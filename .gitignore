@@ -1,0 +1,16 @@
+# Local credentials + cache (created by `vac.py login` / `discover`)
+.roborock_vac.json*
+.roborock_vac_cache.pkl
+*.pkl
+
+# Generated map renders (rebuilt by `vac.py map` / `decode_map.py`)
+map_rooms.png
+map_path.svg
+map_overlay.png
+
+# Your own capture files (watch --raw / --out / --bytes) — may hold tokens + device PII
+*.jsonl
+
+# Python
+__pycache__/
+*.py[cod]

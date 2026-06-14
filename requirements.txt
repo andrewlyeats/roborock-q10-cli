@@ -1,0 +1,11 @@
+# Install:  pip install -r requirements.txt
+# Requires Python >=3.11 — python-roborock 5.x sets Requires-Python >=3.11; on an older
+# interpreter pip silently downgrades to a 0.x release that has no B01/Q10 device support.
+#
+# vac.py depends on python-roborock INTERNALS (see DECISIONS 'dependency fragility').
+# The <6 cap blocks the next major (where a big restructure would land). After ANY
+# upgrade run ./check_roborock_api.py to confirm the internals we use still exist.
+# For a byte-reproducible known-good environment, install from requirements.lock.txt.
+python-roborock>=5.14,<6  # B01/Q10 device API + MQTT (public PyPI package; NOT a fork)
+lz4                       # decompress the protocol-301 room grid
+Pillow                    # render the room map PNG (decode_map.py)

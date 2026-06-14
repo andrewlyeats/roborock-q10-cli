@@ -1,0 +1,15 @@
+aiohttp==3.14.1
+aiomqtt==2.5.1
+click-shell==2.1
+click==8.4.1
+construct==2.10.70
+lz4==4.4.5
+paho-mqtt==2.1.0
+pillow==12.2.0
+protobuf==7.35.1
+pycryptodome==3.23.0
+pycryptodomex==3.23.0
+pyrate-limiter==4.2.0
+python-roborock==5.14.2
+vacuum-map-parser-base==0.1.5
+vacuum-map-parser-roborock==0.1.5
