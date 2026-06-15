@@ -32,7 +32,8 @@ Control:
       [--route fast|daily|fine]  [--count 1|2]
       [--dry-run]                          # post job, verify in list, delete before it fires
   ./vac.py consumables                     # brush/filter/sensor life %
-  ./vac.py history [--json]               # clean history table (UNSHIPPED — TASKS #13)
+  ./vac.py history [--json]               # clean history (live op:list pull is app/push-only — WIP)
+  ./vac.py history --from-capture F.jsonl [--json]  # decode clean history from a watch/echo capture (offline)
   ./vac.py dnd <on|off> [--start HH:MM] [--end HH:MM]
   ./vac.py raw <DP_NAME> [json_value]      # send any raw data-point command
 
@@ -443,6 +444,13 @@ async def cmd_discover(duid: str | None, as_json: bool = False):
             print(f"  State   : {_enum_name(s.status)}")
 
 
+# Empirically-decoded FAULT codes the library's B01Fault table lacks — decoded live from
+# the iOS app's human-readable pushes (see DP_DICTIONARY / DECISIONS s22). The FAULT DP is
+# OVERLOADED: it also carries benign lifecycle/status codes, so "non-zero" ≠ fault.
+_FAULT_OVERRIDES = {8: "robot trapped — clear obstacles"}   # firmware reports trapped as 8 (lib: 513/514)
+_FAULT_BENIGN = {400}   # 400 = "starting scheduled cleanup" — a START code, not a fault
+
+
 async def cmd_status(duid: str | None, as_json: bool = False):
     async with device_session(duid) as (_device, props):
         s = await fetch_status(props)
@@ -453,11 +461,14 @@ async def cmd_status(duid: str | None, as_json: bool = False):
                 print("Could not reach the robot (offline or sleeping).")
             return
         fault_label = None
-        if s.fault:
-            try:
-                fault_label = B01Fault[f"F_{s.fault}"].value.replace("_", " ")
-            except Exception:
-                fault_label = str(s.fault)
+        if s.fault and s.fault not in _FAULT_BENIGN:
+            if s.fault in _FAULT_OVERRIDES:
+                fault_label = _FAULT_OVERRIDES[s.fault]
+            else:
+                try:
+                    fault_label = B01Fault[f"F_{s.fault}"].value.replace("_", " ")
+                except Exception:
+                    fault_label = str(s.fault)
         # clean_task_type / back_type are already-decoded enums on the status object
         # (YXDeviceCleanTask / YXBackType). Surface them: task = what kind of clean
         # (smart/electoral/part…), back_type = return reason (e.g. backcharging).
@@ -525,36 +536,107 @@ async def cmd_consumables(duid: str | None, as_json: bool = False):
                 print(f"  {label:<11}: {hs:<6} {ps}")
 
 
+# ── CLEAN_RECORD decode (shared: live history + --from-capture) ─────────────────
+# 12 underscore fields, field map cross-validated against an 18-record corpus
+# (DECISIONS s24): 2=dur_min, 5=area×1000, 8=mode, 10=pass, 11=ok are solid; 7=water
+# (vacuum→0; 4=possible "custom" level); 3≈0.55×dur; 6=monotonic accumulator (not a
+# clean attribute, so not surfaced).
+_CR_WATER = {0: "off", 1: "low", 2: "medium", 3: "high", 4: "custom"}
+_CR_MODE  = {1: "vac_and_mop", 2: "vacuum", 3: "mop", 4: "customized"}
+_CR_ROUTE = {0: "fast", 1: "daily", 2: "fine"}
+
+
+def _decode_clean_record(raw: str) -> dict | None:
+    parts = raw.split("_")
+    if len(parts) != 12:
+        return None
+    try:
+        return {
+            "id": parts[0],
+            "started": datetime.fromtimestamp(int(parts[1])).strftime("%Y-%m-%d %H:%M"),
+            "duration_min": int(parts[2]),
+            "area_m2": round(int(parts[5]) / 1000, 3),
+            "water": _CR_WATER.get(int(parts[7]), parts[7]),
+            "mode": _CR_MODE.get(int(parts[8]), parts[8]),
+            "route": _CR_ROUTE.get(int(parts[9]), parts[9]),
+            "passes": int(parts[10]),
+            "ok": int(parts[11]) == 1,
+        }
+    except (ValueError, IndexError):
+        return None
+
+
+def _print_clean_history(records, as_json):
+    records.sort(key=lambda r: r["started"], reverse=True)
+    if as_json:
+        print(json.dumps(records, indent=2))
+        return
+    hdr = f"{'Started':<16}  {'Dur':>5}  {'Area':>8}  {'Water':<7}  {'Mode':<12}  {'Route':<5}  {'Pass':>4}  OK"
+    print(hdr)
+    print("-" * len(hdr))
+    for r in records:
+        print(f"{r['started']:<16}  {r['duration_min']:>4}m  {r['area_m2']:>7.3f}m²  "
+              f"{r['water']:<7}  {r['mode']:<12}  {r['route']:<5}  {r['passes']:>4}  {'✓' if r['ok'] else '✗'}")
+
+
+def cmd_history_from_capture(path: str, as_json: bool = False):
+    """Decode the clean history from a capture file — NO live session.
+
+    Reads CLEAN_RECORD `op:list` `data[]` + `op:notify`/status `id` strings. The robot
+    broadcasts its op:list reply on the device topic, so a `watch`/`daemon record` capture
+    taken WHILE the phone app opens its History screen contains the full back-catalog.
+    """
+    seen: dict[str, dict] = {}
+    records: list[dict] = []
+
+    def _harvest(cr):
+        if not isinstance(cr, dict):
+            return
+        ids = [s for s in cr.get("data", []) if isinstance(s, str)] if isinstance(cr.get("data"), list) else []
+        if isinstance(cr.get("id"), str):
+            ids.append(cr["id"])
+        for s in ids:
+            key = "_".join(s.split("_")[:2])    # dedupe by id+epoch
+            if key not in seen:
+                rec = _decode_clean_record(s)
+                if rec:
+                    seen[key] = rec
+                    records.append(rec)
+
+    try:
+        fh = open(path)
+    except OSError as e:
+        sys.exit(f"Cannot read capture: {e}")
+    with fh:
+        for line in fh:
+            if "CLEAN_RECORD" not in line:
+                continue
+            try:
+                j = json.loads(line)
+            except Exception:
+                continue
+            stack = [j]                          # CLEAN_RECORD may be nested under dps/etc.
+            while stack:
+                o = stack.pop()
+                if isinstance(o, dict):
+                    if "CLEAN_RECORD" in o:
+                        _harvest(o["CLEAN_RECORD"])
+                    stack.extend(o.values())
+                elif isinstance(o, list):
+                    stack.extend(o)
+    if not records:
+        print(f"No CLEAN_RECORD entries found in {path}.")
+        return
+    print(f"Recovered {len(records)} clean record(s) from {path}:")
+    _print_clean_history(records, as_json)
+
+
 async def cmd_history(duid: str | None, as_json: bool = False, timeout: int = 15):
-    # UNSHIPPED — op:list REQUEST shape follows the MULTI_MAP pattern but has NOT been
-    # sent by vac.py and confirmed live. Response format (12 fields) IS validated from
-    # captured data (s20, 22-record corpus). Remove this banner + promote to README
-    # after one successful live round-trip. See TASKS #13 and DP_DICTIONARY CLEAN_RECORD.
-    print("NOTE: `history` is UNSHIPPED — op:list request path not yet live-validated (TASKS #13).")
-
-    _WATER = {0: "off", 1: "low", 2: "medium", 3: "high"}
-    _MODE = {1: "vac_and_mop", 2: "vacuum", 3: "mop", 4: "customized"}
-    _ROUTE = {0: "fast", 1: "daily", 2: "fine"}
-
-    def _decode(raw: str) -> dict | None:
-        parts = raw.split("_")
-        if len(parts) != 12:
-            return None
-        try:
-            dt = datetime.fromtimestamp(int(parts[1]))
-            return {
-                "id": parts[0],
-                "started": dt.strftime("%Y-%m-%d %H:%M"),
-                "duration_min": int(parts[2]),
-                "area_m2": round(int(parts[5]) / 1000, 3),
-                "water": _WATER.get(int(parts[7]), parts[7]),
-                "mode": _MODE.get(int(parts[8]), parts[8]),
-                "route": _ROUTE.get(int(parts[9]), parts[9]),
-                "passes": int(parts[10]),
-                "ok": int(parts[11]) == 1,
-            }
-        except (ValueError, IndexError):
-            return None
+    # The op:list REQUEST is app/push-only — a vac.py op:list send gets no reply (DECISIONS
+    # s22–s24). The 12-field parser IS validated (18-record corpus). For the back-catalog
+    # offline, use `--from-capture` on a watch/echo capture taken while the app shows History.
+    print("NOTE: live `history` (op:list pull) is not working yet — the robot pushes the list to the"
+          " app, not to a vac.py request. Use `./vac.py history --from-capture <watch.jsonl>`. (TASKS #13)")
 
     records: list[dict] = []
     seen: set[str] = set()
@@ -572,7 +654,7 @@ async def cmd_history(duid: str | None, as_json: bool = False, timeout: int = 15
                 for raw in cr["data"]:
                     if isinstance(raw, str) and raw not in seen:
                         seen.add(raw)
-                        rec = _decode(raw)
+                        rec = _decode_clean_record(raw)
                         if rec:
                             records.append(rec)
                 got.set()
@@ -601,23 +683,9 @@ async def cmd_history(duid: str | None, as_json: bool = False, timeout: int = 15
             tt.cancel()
 
     if not records:
-        print("No history received — request may be unsupported or timed out.")
+        print("No history received — the op:list pull is app/push-only; use --from-capture.")
         return
-
-    records.sort(key=lambda r: r["started"], reverse=True)
-    if as_json:
-        print(json.dumps(records, indent=2))
-    else:
-        hdr = f"{'Started':<16}  {'Dur':>5}  {'Area':>8}  {'Water':<7}  {'Mode':<12}  {'Route':<5}  {'Pass':>4}  OK"
-        sep = "-" * len(hdr)
-        print(hdr)
-        print(sep)
-        for r in records:
-            print(
-                f"{r['started']:<16}  {r['duration_min']:>4}m  "
-                f"{r['area_m2']:>7.3f}m²  {r['water']:<7}  {r['mode']:<12}  "
-                f"{r['route']:<5}  {r['passes']:>4}  {'✓' if r['ok'] else '✗'}"
-            )
+    _print_clean_history(records, as_json)
 
 
 async def cmd_watch(duid: str | None, out_path: str | None, interval: int):
@@ -917,9 +985,13 @@ async def cmd_map(duid: str | None, timeout: int = 30, out_prefix: str = "map"):
     rooms_out = f"{out_prefix}_rooms.png"
     if best["path"]:
         pts, _ = dm.parse_path(best["path"])
-        with open(path_out, "w") as f:
-            f.write(dm.render_path_svg(pts))
-        print(f"  Robot position: {pts[-1]}  ·  path → {path_out}")
+        pts = dm._drop_path_outlier(pts)   # strip the spurious leading sentinel (green-dot bug) — parity with decode_map.py; band-aid, OPEN QUESTION per DECISIONS s24
+        if pts:
+            with open(path_out, "w") as f:
+                f.write(dm.render_path_svg(pts))
+            print(f"  Robot position: {pts[-1]}  ·  path → {path_out}")
+        else:
+            print("  Path frame had no usable points after sentinel strip — skipping path render.")
     if best["grid"]:
         out = dm.decompress_grid(best["grid"])
         rooms, glen = dm.parse_rooms(out)
@@ -1827,7 +1899,7 @@ class Daemon:
             await _send(writer, {"ok": True, "data": self._set_taps(req.get("args", {}))})
             return
         if kind == "stream":
-            await self._serve_stream(req, writer)
+            await self._serve_stream(req, reader, writer)
             return
 
         # request/response command
@@ -1891,18 +1963,31 @@ class Daemon:
                 self._bytes_task = asyncio.create_task(self._consume_bytes())
         return out
 
-    async def _serve_stream(self, req, writer):
+    async def _serve_stream(self, req, reader, writer):
         q: asyncio.Queue = asyncio.Queue()
         self.watchers.add(q)
+        # Reap promptly on client disconnect: a watch client is one-way after its request,
+        # so reader EOF (b'') means it's gone. Without this the daemon only notices on the
+        # NEXT frame-write, so a dead watcher lingers under an idle robot (s22 lazy-cleanup).
+        eof = asyncio.ensure_future(reader.read())
         try:
-            await _send(writer, {"ok": True, "stream": True})
+            # NOTE: do NOT use _send() here — it closes the writer after sending, which
+            # is correct for one-shot replies but kills a stream after the head (s22 bug).
+            writer.write((json.dumps({"ok": True, "stream": True}) + "\n").encode())
+            await writer.drain()
             while not writer.is_closing():
-                rec = await q.get()
+                getter = asyncio.ensure_future(q.get())
+                done, _ = await asyncio.wait({getter, eof}, return_when=asyncio.FIRST_COMPLETED)
+                if eof in done:                  # client disconnected — stop streaming
+                    getter.cancel()
+                    break
+                rec = getter.result()
                 writer.write((json.dumps(rec, default=str) + "\n").encode())
                 await writer.drain()
         except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
             pass
         finally:
+            eof.cancel()
             self.watchers.discard(q)
 
     async def serve(self):
@@ -1999,13 +2084,22 @@ async def _client_stream(req: dict):
     head = json.loads(first.decode())
     if not head.get("ok"):
         return head
-    raw = "--raw" in req.get("rest", [])
+    rest = req.get("rest", [])
+    raw = "--raw" in rest
+    # honor --out: mirror each frame as a JSON line to the file (s22 — was ignored,
+    # so `watch --raw --out log.jsonl` through the daemon wrote nothing).
+    out_path = (rest[rest.index("--out") + 1]
+                if "--out" in rest and rest.index("--out") + 1 < len(rest) else None)
+    out_f = open(pathlib.Path(out_path).expanduser(), "a") if out_path else None
     try:
         while True:
             line = await reader.readline()
             if not line:
                 break
             rec = json.loads(line.decode())
+            if out_f:
+                out_f.write(json.dumps(rec, default=str) + "\n")
+                out_f.flush()
             if raw:
                 print(json.dumps(rec, default=str))
             else:
@@ -2015,6 +2109,8 @@ async def _client_stream(req: dict):
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        if out_f:
+            out_f.close()
         writer.close()
     return {"ok": True}
 
@@ -2025,7 +2121,7 @@ _DAEMON_DOWN_MSG = (
     "  or run this once standalone (opens its own MQTT session — avoid repeating,\n"
     "  it can hit the cloud rate-limit):   ./vac.py {cmd} --force\n"
     "Why a daemon: it holds ONE cloud connection so commands don't each reconnect.\n"
-    "See DESIGN_NOTES.md / DAEMON.md."
+    "See the Daemon section of README.md."
 )
 
 
@@ -2111,7 +2207,15 @@ def cmd_daemon(rest):
             PID_PATH.unlink(missing_ok=True)
         return
     if sub == "restart":
-        cmd_daemon(["stop"]); time.sleep(1.0); cmd_daemon(["start"]); return
+        # Preserve the running daemon's careful mode across the restart (s22: restart
+        # used to silently drop --careful). An explicit --careful on the restart wins.
+        careful = "--careful" in rest
+        if not careful:
+            res = asyncio.run(_client_send({"kind": "ping"}))
+            if isinstance(res, dict):
+                careful = bool(res.get("data", {}).get("careful"))
+        cmd_daemon(["stop"]); time.sleep(1.0)
+        cmd_daemon(["start"] + (["--careful"] if careful else [])); return
     if sub == "status":
         if not _daemon_alive():
             if HALT_PATH.exists():
@@ -2298,6 +2402,14 @@ def main():
         return cmd_daemon(rest)
     if cmd == "login":
         return _local_main(cmd, rest, duid, as_json)
+
+    # `history --from-capture <file>` is fully offline — decode a capture, no session/daemon.
+    if cmd == "history" and "--from-capture" in rest:
+        i = rest.index("--from-capture")
+        path = rest[i + 1] if i + 1 < len(rest) else None
+        if not path:
+            sys.exit("Usage: ./vac.py history --from-capture <capture.jsonl> [--json]")
+        return cmd_history_from_capture(path, as_json)
 
     # `watch --bytes` is a raw-frame RE capture — keep it standalone (or use a daemon tap).
     if cmd == "watch" and "--bytes" in rest and not force:

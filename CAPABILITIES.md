@@ -1,7 +1,9 @@
 # Capability matrix — Roborock Q10 S5+ (B01)
 
 Every interaction the robot exposes (all 114 `B01_Q10_DP` data-points + library traits),
-scoped by what we can and can't do. Built 2026-06-12 from live testing + source/web research.
+scoped by what we can and can't do. Built 2026-06-12 from live testing + source/web research;
+**refreshed 2026-06-15** with s21–s24 (single-connection daemon, a complete live clean cycle,
+the settings matrix, STATUS↔mode mapping, and offline `history --from-capture`).
 
 **Legend**
 - ✅ **Confirmed** — tested live, works.
@@ -35,7 +37,7 @@ for anything else (fire-and-forget). Reads come back on the MQTT stream, not as 
 | Empty dustbin (dock) | `START_DOCK_TASK 2` / `empty_dustbin()` | ✅ | dock auto-empty; loud, no robot motion. **Confirmed against a live device:** auto-empty fired on dock return (STATUS 22, BACK_TYPE=4). |
 | Locate beep | `SEEK {}` / `vac.py find` | ✅ | **`vac.py find` sent OK against a live device** ("Locate signal sent"); audible beep not machine-verifiable. |
 | Manual drive | `REMOTE` via `remote.{forward,left,right,stop}` | 🟢 | exposed; **moves the robot** — untested. |
-| Room / segment clean | one-time `POST /jobs` `rooms:[…]` (REST) | ✅ **validated live (targeting)** | `./vac.py clean-rooms <name\|id>…`. **Targeting confirmed live on 3 rooms** — robot accepted EXACTLY the requested room (`CLEAN_EXPAND.room_id_list`=[5]/[6]/[1], `CLEAN_TASK_TYPE`=2). `--fan max_plus` posts `fanLevel=5` (B01 fix) ✅; numeric-id grid-skip ✅. NB: physical cleans **faulted** (570/501) due to the **environment** (a virtual-wall enclosure made some rooms unreachable; cramped baths) — not a vac.py bug; targeting was always correct. A fault-free complete physical run still wanted. `--dry-run` posts a disabled job (safe). |
+| Room / segment clean | one-time `POST /jobs` `rooms:[…]` (REST) | ✅ **validated live (targeting)** | `./vac.py clean-rooms <name\|id>…`. **Targeting confirmed live on 3 rooms** — robot accepted EXACTLY the requested room (`CLEAN_EXPAND.room_id_list`=[5]/[6]/[1], `CLEAN_TASK_TYPE`=2). `--fan max_plus` posts `fanLevel=5` (B01 fix) ✅; numeric-id grid-skip ✅. NB: physical cleans **faulted** (570/501) due to the **environment** (a virtual-wall enclosure made some rooms unreachable; cramped baths) — not a vac.py bug; targeting was always correct. A fault-free complete physical run still wanted. `--dry-run` posts a disabled job (safe). **s23/s24: a COMPLETE clean cycle is validated live** (undock→clean→bin-empty→docked+charging, room 6 + kitchen); **`--water`/`--route`/`--count` confirmed on the wire** (s24 — `--count 2` = double-pass in one run; `--route fine` = tighter/longer; water level took effect). The only faults were a **transient `501` cliff at a doorway threshold** (environmental — the same spot each run, self-recovers in seconds; NOT a vac.py bug). |
 | Zone / spot clean | `CUSTOMER_CLEAN` / `CUSTOMER_CLEAN_REQUEST` | 🟡 | payload unknown. |
 | Add-area clean | `ADD_CLEAN_AREA` / `ADD_CLEAN_STATE` | 🟡 | unknown. |
 | Cancel in motion | `TASK_CANCEL_IN_MOTION` | 🟡 | unknown. |
@@ -128,6 +130,18 @@ structured DP we *can* send (`{op:list}` works), so its other `op`s may be reach
 | On-device schedule | `TIMER` / `REQUEST_TIMER` / `TIMER_TYPE` | 🟡 | format unknown; fallback if REST writes stay blocked. |
 | Host cron | `./vac.py start` via system cron | ✅ alt | simplest path for "clean daily at 10 AM" — no REST write needed. |
 
+## Connection / daemon (added s21–s24)
+The cloud broker rate-limits new MQTT CONNECTs (account-level `code 135`), which knocks out the CLI
+*and* the phone app. Fixed architecturally — a long-running **daemon holds ONE MQTT connection** and
+serves the CLI over a Unix socket. See DECISIONS s21–s24, DESIGN_NOTES.
+
+| Interaction | How | Status | Notes |
+|---|---|---|---|
+| Single-connection daemon | `./vac.py daemon start [--careful]` / `stop` / `restart` / `status` | ✅ **validated live (s22–s24)** | Holds one `DeviceManager`; the CLI uses it by default (`--force` runs standalone). Cloud-hold proven over ~1 hr and many cleans; `--careful` halts on the first 135/auth complaint and is **preserved across `restart`** (s24). |
+| Telemetry taps | `./vac.py daemon record --events/--novel/--bytes F` | ✅ | In-process fan-out over the one held connection → **zero extra cloud connections/subscriptions** (verified in the library, s24). `--bytes` captures raw 301 map/path frames. |
+| Live stream | `./vac.py watch [--raw\|--bytes] [--out F]` | ✅ | Streams the daemon event bus to stdout/file; watchers reaped promptly on client disconnect (s24). |
+| 135 recovery | escalating backoff → `needs_login` | 🟢 | offline-tested; not yet exercised by a *natural* live 135. Don't provoke. |
+
 ## Reads / telemetry (all ✅ — see DP_DICTIONARY.md)
 State `STATUS`, `BATTERY`, `CLEAN_PROGRESS`, `CLEAN_TIME`, `CLEAN_AREA`, `FAULT`,
 `CLEAN_TASK_TYPE`, `BACK_TYPE`, `MOP_STATE` · totals `TOTAL_CLEAN_*`, `CLEAN_COUNT` ·
@@ -135,7 +149,14 @@ consumables `*_LIFE` (read) · env `NET_INFO`, `TIME_ZONE`, `ROBOT_COUNTRY_CODE`
 `ROBOT_TYPE`, `USER_PLAN`, `VOICE_VERSION/LANGUAGE`, `AREA_UNIT` · plumbing `REQUEST_DPS`,
 `HEARTBEAT`, `OFFLINE`, `COMMON` (response wrapper).
 - ✅ `CLEAN_RECORD` — clean **history** decoded: `{"data":[<underscore-string per clean>]}`
-  (`<id>_<unixtime>_…_<flags>`). Emitted on `op:notify` (e.g. when the app opens history).
+  (`<id>_<unixtime>_…_<flags>`). 12-field map cross-validated against an 18-record corpus (s24):
+  dur_min / area / mode / pass / ok solid; field 7 = water; 6 = monotonic accumulator. The robot pushes
+  the list via `op:notify` / broadcasts the `op:list` reply (e.g. when the app opens History) — a vac.py
+  `op:list` PULL gets no reply (app/push-only). **`./vac.py history --from-capture <watch.jsonl>`** decodes
+  the back-catalog OFFLINE from any capture (recovers 19 records from `session2_echo.jsonl`).
+- ✅ **STATUS during cleaning is mode-specific** (s24): `102`=vacuuming, `103`=mopping, `104`=sweep_and_mop
+  (= CLEAN_MODE 2 / 3 / 1); `6`/`101`/`104`/`105` are returning/relocating/transition; `22`=dock auto-empty;
+  `8`=charging. See DP_DICTIONARY STATUS row.
 - 🟡 `DEVICE_INFO`, `RECENT_CLEAN_RECORD` — returned nothing to a bare request.
 
 ---
@@ -147,10 +168,11 @@ consumables `*_LIFE` (read) · env `NET_INFO`, `TIME_ZONE`, `ROBOT_COUNTRY_CODE`
 B01 fan=5) ✅; settings cloud-authoritative behaviour fully mapped live ✅;
 the volume/boost/child-lock settings are cloud-authoritative ✅.
 
-1. **Live room clean** — **validated live** for targeting/params (robot accepted the exact requested room
-   each time). Still wanted: one **fault-free complete physical run** — the cleans faulted on
-   environment (virtual-wall enclosure / cramped baths), not software. Best next attempt: an open,
-   reachable room with the area clear.
+1. **Live room clean** — **validated live** for targeting/params, and **s23/s24 a COMPLETE clean cycle
+   is done** (undock→clean→dock→charging) plus a settings matrix (`--water`/`--route`/`--count` all take
+   effect). The remaining nit is a STRICTLY fault-free run: every run trips a transient `501` cliff at a
+   fixed **doorway threshold** (environmental, self-recovers in seconds — localized to the kitchen door
+   and the en-suite). Fix = clear/zone that sill, then a clean room with the area clear.
 2. **Settings** — **validated live:** volume/child-lock/boost/dnd are cloud-authoritative (CLI sends
    accepted but reverted); fan/water/mode persist (session params) ✅. CLI now prints a revert caveat.
 3. **Walls/zones SET** — MQTT-only (write command rides the blocked input topic). Read formats

@@ -26,16 +26,23 @@ These capabilities are implemented and validated against a live device:
 - **Live telemetry stream** — `watch` follows the device in real time (optional CSV/JSONL
   output) and projects a clean ETA and battery-to-finish estimate.
 - **Scalar settings** — set runtime parameters like fan, water, and clean mode.
+- **Single-connection daemon** — a long-running helper holds one cloud connection and serves all CLI
+  commands over a local socket (no reconnect per command). Validated against a live robot: one held
+  connection served an hour of cleans without reconnecting, and `--careful` mode survives `restart`.
+- **Room-targeted cleaning, end to end** — a complete clean cycle (undock → clean → dock → charging) is
+  validated live, including `--water` / `--route` / `--count` taking effect on the wire.
+- **Clean history** — decode the robot's per-clean records (date, duration, area, water, mode, route,
+  passes, completed) with `history --from-capture` from a `watch`/`daemon record` capture.
 
 ## Planned / not yet validated
 
-- **One fault-free complete physical room clean** — room targeting is validated, but a full
-  end-to-end physical clean of a clear, reachable room is still pending confirmation.
-- **`history` command** — the clean-record format and parser are done; needs one live
-  round-trip to confirm the request shape before shipping.
-- **Single-connection daemon** — a long-running helper that holds one cloud connection open
-  and serves all CLI commands over a local socket (to avoid reconnecting on every command).
-  Built and offline-tested; live validation of its connection-holding behaviour is pending.
+- **A *strictly* fault-free complete clean** — a complete cycle works, but every run so far trips a
+  transient cliff-sensor fault at a fixed **doorway threshold** (environmental; the robot self-recovers
+  in seconds). A run over a cleared/zoned sill is the remaining confirmation.
+- **Live `history` fetch** — the back-catalog decodes offline from a capture today; a *live* pull is
+  app/push-only (the robot broadcasts its history to the app, not to a direct request) — still WIP.
+- **Automatic `135` recovery** — the daemon's cool-down/reconnect path is offline-tested but not yet
+  exercised by a natural live ban.
 - **Optional package split** — packaging the CLI and the map decoder for easier install.
 - **Home Assistant usage section** — optional docs for driving the CLI from HA shell commands.
 - **Other B01 / Q-series models** — only the Q10 is tested today. Support for sibling models
@@ -54,7 +61,7 @@ These capabilities are implemented and validated against a live device:
   re-asserted by the server, so writes to them may revert. Runtime settings (fan/water/mode)
   stick.
 - **Connection rate limits.** Reconnecting too frequently can trip an account-level connection
-  limit. Be gentle, and prefer the long-running daemon (once validated) over rapid repeated
-  one-shot commands.
+  limit (`code 135`). Be gentle, and prefer the long-running daemon (validated) over rapid
+  repeated one-shot commands.
 - **Structured map mutations are read-only.** Virtual walls, no-go/no-mop zones, and room
   split/merge/rename can be decoded but not set from this tool.

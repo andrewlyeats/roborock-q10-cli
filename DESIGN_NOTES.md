@@ -58,6 +58,8 @@ The fix is architectural: a **long-lived daemon that holds exactly one MQTT conn
 
 Because the library does not auto-recover from a 135, the daemon catches it, **cools down with escalating backoff, and reconnects** with the existing credentials; a genuine token revocation (which needs an interactive re-login) is surfaced clearly rather than retried blindly. There is also a **careful mode** that stops on the first auth/rate-limit complaint rather than risk hammering the account. The broader discipline this enforces: **budget total MQTT connects, not just per-command reversibility** — use one persistent session, monitor by reading its output rather than re-polling, and let the reconnect loop recover a quiet-but-alive session instead of killing and reopening it.
 
+A useful consequence: **telemetry taps and `watch` clients are free on the connection budget.** They are in-process fan-out over the one held connection — each subscriber registers a local callback and gets its own copy of the stream, and a second subscription to the same device topic sends no new MQTT SUBSCRIBE and opens no connection. So you can record every decoded data-point, the first-seen ones, and the raw frames, and attach several live viewers at once, while the cloud still sees a single well-behaved client.
+
 ## Cloud-authoritative vs runtime settings
 
 Not every setting behaves the same way when you write it over MQTT, and this surprised us until we understood the split:

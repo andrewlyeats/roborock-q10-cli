@@ -44,7 +44,12 @@ import json
 import struct
 import sys
 
-PATH_SIG = "0201000800020000"
+# Path frames: match only the 2-byte sub-type PREFIX (0201). Byte 3 of the full header
+# varies by session / firmware / clean-mode (0x08 AND 0x11 both observed — s23 mop-mode
+# emitted 0201_0011_...); parse_path reads the point count from bytes 8-9 and is agnostic
+# to it. Matching the full 8-byte sig "0201000800020000" found ZERO path frames whenever
+# byte 3 differed (it silently dropped the entire s23 cleaning path). See DECISIONS s23.
+PATH_SIG = "0201"
 # Grid frames: match only the 2-byte sub-type PREFIX. Bytes 2-5 of the full 8-byte
 # header are a device-specific map id (e.g. <device-map-id> on the dev's robot) and differ per
 # device/home — matching the full signature would find zero frames on anyone else's robot.
@@ -87,12 +92,36 @@ def load_frames(path, sig):
 # ── path (0201) ────────────────────────────────────────────────────────────────
 
 def parse_path(raw):
-    """Return (points, declared_count). Big-endian int16 (x,y) after 16-byte header."""
+    """Return (points, declared_count). Big-endian int16 (x,y) after 16-byte header.
+
+    WORKED AROUND, NOT understood (s24): the 0201_0x11+ frames carry a SPURIOUS first point —
+    a constant ~(0,-1900) (x≈map-origin, y≈dock-y), outside the map; the 0008 era had a normal
+    point here. The header is 16 bytes for BOTH eras (byte 3 is just a per-clean counter), so
+    pts[0] is structurally a real point whose VALUE is anomalous — we don't know why the newer
+    firmware emits it (dock/origin reference? delta base?). Callers strip it via
+    `_drop_path_outlier(pts)` (a band-aid, NOT a resolution). Do NOT "fix" by shifting the offset
+    (16→18 re-pairs every int16 and transposes the path — tried+reverted s23). OPEN: DECISIONS/TASKS.
+    """
     count = struct.unpack(">H", raw[8:10])[0]
     body = raw[16:]
     n = len(body) // 4
     pts = [struct.unpack(">hh", body[i * 4:i * 4 + 4]) for i in range(n)]
     return pts, count
+
+
+def _drop_path_outlier(pts):
+    """BAND-AID (not a resolution) for the unexplained spurious first point in 0201_0x11+ path
+    frames (a constant ~(0,-1900), outside the map — meaning UNKNOWN; see parse_path + DECISIONS
+    s24 OPEN QUESTION). Drop pts[0] ONLY if its step to pts[1] is a gross outlier (>20x the median
+    step), so a real pts[0] (e.g. the 0008 dock point) is never dropped. Surfaced as the green
+    START dot landing outside the apartment walls (user-caught, s24).
+    """
+    if len(pts) < 4:
+        return pts
+    steps = [abs(pts[i + 1][0] - pts[i][0]) + abs(pts[i + 1][1] - pts[i][1]) for i in range(len(pts) - 1)]
+    rest = sorted(steps[1:])
+    med = rest[len(rest) // 2] or 1
+    return pts[1:] if steps[0] > 20 * med else pts
 
 
 def render_path_svg(pts, scale=10.0, pad=12):
@@ -464,6 +493,7 @@ def main():
     if paths:
         tm, raw = max(paths, key=lambda x: len(x[1]))
         pts, declared = parse_path(raw)
+        pts = _drop_path_outlier(pts)          # s24: strip the spurious leading sentinel (green-dot bug)
         xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
         print(f"\nPATH @ {tm}: {len(pts)} points (header {declared})")
         print(f"  extent x {min(xs)}..{max(xs)}  y {min(ys)}..{max(ys)} "
@@ -488,6 +518,7 @@ def main():
 
         if paths:
             pts, _ = parse_path(max(paths, key=lambda x: len(x[1]))[1])
+            pts = _drop_path_outlier(pts)      # s24: same sentinel strip as the SVG path
             overlay = render_overlay_png(grid, W, H, rooms, pts, dp_overlay=dp_overlay)
             overlay.save("map_overlay.png")
             suffix = " + DP shapes" if dp_overlay else ""
