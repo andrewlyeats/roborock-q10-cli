@@ -214,15 +214,23 @@ def grid_dims_from_header(raw):
     return None
 
 
-def resolve_dims(raw, grid):
-    """(W, H, source): prefer the header field; fall back to find_width if the header is
-    absent/implausible or its W×H doesn't match the actual cell count (catches a firmware
-    header change before it silently mis-renders)."""
+def resolve_dims(raw, out):
+    """(W, H, grid, source) from the full decompressed `out`. Prefer the header dims
+    (raw[7:9],[9:11]) and slice `grid = out[:W*H]`; fall back to find_width over the
+    parse_rooms-trimmed region only if the header is absent/implausible.
+
+    Slicing by the HEADER dims (not by parse_rooms' boundary) is what keeps decode robust:
+    some frames decompress to exactly W*H+2 bytes (a 2-byte room footer), which made the old
+    find_width path mis-detect the stride (e.g. 418×41) on in-progress/edge frames. See
+    DECISIONS s26. `(0,0)` reset frames → grid_dims_from_header returns None → fallback."""
     hdr = grid_dims_from_header(raw)
-    if hdr and hdr[0] * hdr[1] == len(grid):
-        return hdr[0], hdr[1], "header"
+    if hdr and hdr[0] * hdr[1] <= len(out):
+        W, H = hdr
+        return W, H, out[:W * H], "header"
+    _, grid_len = parse_rooms(out)
+    grid = out[:grid_len]
     W, H = find_width(grid)
-    return W, H, "find_width"
+    return W, H, grid, "find_width"
 
 
 def fit_origin(grid, W, H, pts, res=GRID_MM_PER_PIXEL):
@@ -337,7 +345,7 @@ def load_dp_overlay(dps_path):
     return {
         "walls":       parse_virtual_walls(latest.get("VIRTUAL_WALL_UP")),
         "no_go":       parse_restricted_zones(latest.get("RESTRICTED_ZONE_UP"), want_type=0x00),
-        "no_mop":      parse_restricted_zones(latest.get("RESTRICTED_ZONE_UP"), want_type=0x01),
+        "no_mop":      parse_restricted_zones(latest.get("RESTRICTED_ZONE_UP"), want_type=0x02),
         "clean_zones": parse_restricted_zones(latest.get("ZONED_UP"), want_type=0x01),
         "carpets":     parse_carpets(latest.get("CARPET_UP")),
     }
@@ -368,8 +376,13 @@ def parse_virtual_walls(value):
 def parse_restricted_zones(value, want_type):
     """RESTRICTED_ZONE_UP / ZONED_UP base64 → list of 4-corner polygons in mm.
 
-    Format: [0x01][count:u8] + count × ([type:u8][nverts:u8=4] + 4×(x,y) BE int16)
-    want_type=0x00 → no-go zones; 0x01 → no-mop / cleaning zones.
+    Format: [0x01][count:u8] + count × FIXED-SIZE slots. Each slot:
+      [type:u8][nverts:u8] + nverts×(x,y) BE int16, then ZERO-PADDED to the slot stride
+      (stride reserves up to 9 verts → 2 + 9*4 = 38 bytes; derived from len/count for safety).
+    Zones are NOT tightly packed — walking them packed makes a no-go's (type 0x00) trailing
+    zero-pad look like a second empty zone and skips the real next zone (s26 ground-truth bug).
+    Types for RESTRICTED_ZONE_UP, confirmed by drawing each (s26): **0x00 = no-go, 0x02 = no-mop**.
+    (ZONED_UP cleaning-zone type is unverified — never captured populated.)
     """
     if not value:
         return []
@@ -377,22 +390,25 @@ def parse_restricted_zones(value, want_type):
     if len(raw) < 2 or raw[0] != 0x01:
         return []
     count = raw[1]
+    if count == 0:
+        return []
+    body = len(raw) - 2
+    stride = body // count if body % count == 0 and body // count >= 6 else 2 + 9 * 4
     zones = []
-    pos = 2
-    for _ in range(count):
-        if pos + 2 > len(raw):
+    for i in range(count):
+        off = 2 + i * stride
+        if off + 2 > len(raw):
             break
-        zone_type = raw[pos]
-        nverts = raw[pos + 1]
-        pos += 2
+        zone_type = raw[off]
+        nverts = raw[off + 1]
         pts = []
-        for _ in range(nverts):
-            if pos + 4 > len(raw):
+        for j in range(nverts):
+            p = off + 2 + j * 4
+            if p + 4 > len(raw):
                 break
-            x, y = struct.unpack(">hh", raw[pos:pos + 4])
+            x, y = struct.unpack(">hh", raw[p:p + 4])
             pts.append((x, y))
-            pos += 4
-        if zone_type == want_type:
+        if zone_type == want_type and pts:
             zones.append(pts)
     return zones
 
@@ -594,9 +610,8 @@ def main():
     if grids:
         tm, raw = max(grids, key=lambda x: len(x[1]))
         out = decompress_grid(raw)
-        rooms, grid_len = parse_rooms(out)
-        grid = out[:grid_len]
-        W, H, dsrc = resolve_dims(raw, grid)
+        W, H, grid, dsrc = resolve_dims(raw, out)
+        rooms, _ = parse_rooms(out)
         print(f"\nROOM GRID @ {tm}: {len(grid)} cells, {W}x{H} (via {dsrc}), {len(rooms)} rooms")
         for rid in sorted(rooms):
             print(f"  room {rid}: {rooms[rid]}")

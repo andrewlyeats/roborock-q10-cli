@@ -37,6 +37,7 @@ SYMBOLS = [
     ("roborock.data.b01_q10.b01_q10_code_mappings", "YXFanLevel", "med"),
     ("roborock.data.b01_q10.b01_q10_code_mappings", "YXWaterLevel", "med"),
     ("roborock.data.b01_q10.b01_q10_code_mappings", "YXCleanType", "med"),
+    ("roborock.data.b01_q10.b01_q10_code_mappings", "YXCleanLine", "med"),  # vac.py: clean-rooms/schedule --route
 ]
 
 # Specific enum members vac.py sends by name — a rename here breaks commands silently.
@@ -44,6 +45,24 @@ REQUIRED_DPS = [
     "MULTI_MAP", "START_CLEAN", "SEEK", "WATER_LEVEL", "FAN_LEVEL",
     "NOT_DISTURB", "NOT_DISTURB_DATA", "VOLUME", "CHILD_LOCK", "AUTO_BOOST",
 ]
+
+# Instance/trait API surface every action command goes through (props.vacuum.* / command.send /
+# status.add_update_listener / props.refresh). Introspected on the CLASSES — no live device needed.
+# This is the gap the import checks miss: a rename here PASSES the imports, then crashes the first
+# dock/watch (s26 audit, TASKS #15).
+TRAIT_METHODS = {
+    ("roborock.devices.traits.b01.q10.vacuum", "VacuumTrait"):
+        ["start_clean", "stop_clean", "pause_clean", "resume_clean",
+         "return_to_dock", "empty_dustbin", "set_fan_level", "set_clean_mode"],
+    ("roborock.devices.traits.b01.q10.command", "CommandTrait"): ["send"],
+    ("roborock.devices.traits.b01.q10.status", "StatusTrait"): ["add_update_listener"],
+    ("roborock.devices.traits.b01", "Q10PropertiesApi"): ["refresh"],
+}
+# Q10PropertiesApi exposes these traits as annotated instance attrs (props.vacuum, props.command, …).
+TRAIT_ATTRS = {("roborock.devices.traits.b01", "Q10PropertiesApi"):
+               ["vacuum", "command", "status", "remote"]}
+# YX* enums vac.py resolves and reads `.code` from on the wire (e.g. YXWaterLevel.MEDIUM.code).
+ENUM_CODE_CHECKS = ["YXFanLevel", "YXWaterLevel", "YXCleanType", "YXCleanLine"]
 
 failures = []
 warnings = []
@@ -110,6 +129,38 @@ def main():
             )
     except Exception as e:
         warnings.append(f"could not introspect b01_q10_channel for subscribe_stream: {e}")
+
+    # 4) Trait method surface — vac.py drives the robot through props.vacuum.* / command.send /
+    #    status.add_update_listener / props.refresh. Introspect the classes (no live device needed).
+    for (module, cls_name), methods in TRAIT_METHODS.items():
+        try:
+            cls = getattr(importlib.import_module(module), cls_name)
+        except Exception as e:
+            failures.append(f"[high] cannot import trait class {module}.{cls_name}: {e}")
+            continue
+        for m in methods:
+            if not hasattr(cls, m):
+                failures.append(f"[high] {cls_name}.{m}() is GONE (vac.py calls props.*.{m})")
+    # 4b) Trait attributes (props.vacuum/command/status/remote) — annotated instance attrs.
+    for (module, cls_name), attrs in TRAIT_ATTRS.items():
+        try:
+            cls = getattr(importlib.import_module(module), cls_name)
+        except Exception:
+            continue  # import failure already reported in 4
+        ann = getattr(cls, "__annotations__", {})
+        for a in attrs:
+            if a not in ann and not hasattr(cls, a):
+                failures.append(f"[high] {cls_name}.{a} trait is GONE (vac.py uses props.{a})")
+
+    # 5) YX* enum members must expose `.code` — vac.py sends MEMBER.code on the wire.
+    enum_mod = "roborock.data.b01_q10.b01_q10_code_mappings"
+    for ename in ENUM_CODE_CHECKS:
+        E = resolved.get((enum_mod, ename))
+        if E is None:
+            continue  # import failure already reported in SYMBOLS loop
+        members = list(E)
+        if not members or not hasattr(members[0], "code"):
+            failures.append(f"[med] {ename} members lack a `.code` attr (vac.py sends MEMBER.code)")
 
     print("RESULT")
     if warnings:

@@ -39,6 +39,12 @@ Initial public release candidate.
   idle robot).
 - **`status` no longer reports benign lifecycle codes as faults.** The device's fault field is overloaded
   (it also carries state codes); known benign codes are suppressed and decoded codes are labelled.
+- **Map decode reads grid dimensions from the frame header** instead of guessing them heuristically, and
+  slices the grid by those dimensions — robust to frames that carry a trailing room-record footer (which
+  previously mis-sized the grid). Verified header-vs-heuristic agree on every captured frame.
+- **No-mop zones now decode.** `RESTRICTED_ZONE_UP` packs zones in fixed-size padded slots; the decoder
+  walked them tightly-packed, so with more than one zone it misread a no-go's padding as an empty second
+  zone and missed the rest. Now slot-aware, and no-mop zones (type `0x02`) are recognised.
 
 ### Known gaps (see [ROADMAP.md](ROADMAP.md))
 - Daemon persistent connection is now **validated live** (holds one connection, survives a clean cycle,

@@ -994,9 +994,8 @@ async def cmd_map(duid: str | None, timeout: int = 30, out_prefix: str = "map"):
             print("  Path frame had no usable points after sentinel strip — skipping path render.")
     if best["grid"]:
         out = dm.decompress_grid(best["grid"])
-        rooms, glen = dm.parse_rooms(out)
-        grid = out[:glen]
-        w, h, _ = dm.resolve_dims(best["grid"], grid)   # s25: read W/H from the header (find_width fallback)
+        w, h, grid, _ = dm.resolve_dims(best["grid"], out)   # s25/s26: header dims + slice grid=out[:W*H]
+        rooms, _ = dm.parse_rooms(out)
         dm.render_grid_png(grid, w, h, rooms).save(rooms_out)
         names = ", ".join(rooms[r].replace("rr_", "") for r in sorted(rooms))
         print(f"  Rooms ({w}x{h}): {names}")
