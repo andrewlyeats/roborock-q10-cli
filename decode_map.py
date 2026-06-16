@@ -180,7 +180,11 @@ def parse_rooms(out):
 
 
 def find_width(grid):
-    """The row stride that makes vertically-adjacent rows most similar (real image)."""
+    """The row stride that makes vertically-adjacent rows most similar (real image).
+
+    Empirical fallback for `grid_dims_from_header` — kept as a cross-check and for any
+    frame whose header is absent/implausible.
+    """
     best = None
     for W in range(60, 800):
         if len(grid) % W:
@@ -193,6 +197,90 @@ def find_width(grid):
         if best is None or score < best[0]:
             best = (score, W, H)
     return best[1], best[2]  # (W, H)
+
+
+def grid_dims_from_header(raw):
+    """Grid (W, H) read straight from the 0101 frame header: raw[7:9]=W, raw[9:11]=H,
+    both BE u16. Verified 100% against find_width across 424 frames / 2 widths (DECISIONS
+    s25). Returns None if the bytes are missing or implausible, so callers fall back to
+    find_width. This is what makes the decode size-agnostic on any home (the dimensions
+    are read off the wire, not guessed from a row-stride heuristic)."""
+    if len(raw) < 11:
+        return None
+    W = struct.unpack(">H", raw[7:9])[0]
+    H = struct.unpack(">H", raw[9:11])[0]
+    if 60 <= W <= 800 and 8 <= H <= 800:
+        return W, H
+    return None
+
+
+def resolve_dims(raw, grid):
+    """(W, H, source): prefer the header field; fall back to find_width if the header is
+    absent/implausible or its W×H doesn't match the actual cell count (catches a firmware
+    header change before it silently mis-renders)."""
+    hdr = grid_dims_from_header(raw)
+    if hdr and hdr[0] * hdr[1] == len(grid):
+        return hdr[0], hdr[1], "header"
+    W, H = find_width(grid)
+    return W, H, "find_width"
+
+
+def fit_origin(grid, W, H, pts, res=GRID_MM_PER_PIXEL):
+    """Auto-fit the path→grid registration origin (ox, oy) by grid-search: pick the (ox,
+    oy) that lands the most path points on FLOOR cells (b%4==0, b!=0). The path must lie
+    inside the W×H grid, which bounds the search tightly. Returns (ox, oy, res, score) with
+    score = on-floor fraction, or None if it can't fit.
+
+    The origin is NOT transmitted in the map frame (exhaustive header+body search, DECISIONS
+    s25), but it's stable to ~1px per home — so we derive it per capture instead of shipping
+    a hand-fit constant. This generalises the overlay to any home/dock without calibration.
+    """
+    if len(pts) < 4:
+        return None
+    floor = {(i % W, i // W) for i, b in enumerate(grid) if b and b % 4 == 0}
+    if not floor:
+        return None
+    xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+    minx, maxx, miny, maxy = min(xs), max(xs), min(ys), max(ys)
+    # The whole path must map into [0,W)×[0,H) → principled, tight bounds on the origin.
+    ox_lo, ox_hi = maxx, minx + H * res
+    oy_lo, oy_hi = maxy - W * res, miny
+    if ox_lo > ox_hi or oy_lo > oy_hi:
+        return None  # path larger than the grid — can't be a clean fit
+
+    def score(ox, oy, sample):
+        # floor is keyed (col, row); coord_to_pixel uses col=(y-oy)//res, row=(ox-x)//res.
+        hit = 0
+        for x, y in sample:
+            if ((y - oy) // res, (ox - x) // res) in floor:
+                hit += 1
+        return hit
+
+    sample = pts if len(pts) <= 1500 else pts[::max(1, len(pts) // 1500)]
+
+    # coarse pass (subsampled), then fine pass (full points) around the winner
+    best = None
+    cstep = res * 4
+    ox = ox_lo
+    while ox <= ox_hi:
+        oy = oy_lo
+        while oy <= oy_hi:
+            s = score(ox, oy, sample)
+            if best is None or s > best[0]:
+                best = (s, ox, oy)
+            oy += cstep
+        ox += cstep
+    if best is None:
+        return None
+    _, cox, coy = best
+    best = None
+    for ox in range(cox - res * 4, cox + res * 4 + 1, res):
+        for oy in range(coy - res * 4, coy + res * 4 + 1, res):
+            s = score(ox, oy, pts)
+            if best is None or s > best[0]:
+                best = (s, ox, oy)
+    sc, ox, oy = best
+    return ox, oy, res, sc / len(pts)
 
 
 def render_grid_png(grid, W, H, rooms, scale=3):
@@ -508,8 +596,8 @@ def main():
         out = decompress_grid(raw)
         rooms, grid_len = parse_rooms(out)
         grid = out[:grid_len]
-        W, H = find_width(grid)
-        print(f"\nROOM GRID @ {tm}: {len(grid)} cells, {W}x{H}, {len(rooms)} rooms")
+        W, H, dsrc = resolve_dims(raw, grid)
+        print(f"\nROOM GRID @ {tm}: {len(grid)} cells, {W}x{H} (via {dsrc}), {len(rooms)} rooms")
         for rid in sorted(rooms):
             print(f"  room {rid}: {rooms[rid]}")
         img = render_grid_png(grid, W, H, rooms)
@@ -519,7 +607,16 @@ def main():
         if paths:
             pts, _ = parse_path(max(paths, key=lambda x: len(x[1]))[1])
             pts = _drop_path_outlier(pts)      # s24: same sentinel strip as the SVG path
-            overlay = render_overlay_png(grid, W, H, rooms, pts, dp_overlay=dp_overlay)
+            fit = fit_origin(grid, W, H, pts)  # s25: derive registration per capture (origin isn't in the frame)
+            if fit and fit[3] >= 0.90:
+                ox, oy, res, sc = fit
+                print(f"  georef auto-fit: OX={ox} OY={oy} res={res} ({sc*100:.1f}% of path on floor)")
+            else:
+                ox, oy, res = GRID_ORIGIN_OX, GRID_ORIGIN_OY, GRID_MM_PER_PIXEL
+                why = f"weak ({fit[3] * 100:.0f}%)" if fit else "no fit"
+                print(f"  georef auto-fit {why} → committed OX={ox} OY={oy} res={res}")
+            overlay = render_overlay_png(grid, W, H, rooms, pts, dp_overlay=dp_overlay,
+                                         ox=ox, oy=oy, res=res)
             overlay.save("map_overlay.png")
             suffix = " + DP shapes" if dp_overlay else ""
             print(f"  wrote map_overlay.png (path on grid{suffix})")

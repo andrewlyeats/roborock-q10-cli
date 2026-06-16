@@ -18,7 +18,8 @@ disclaimer below.
 ### What this documents (the part worth reading)
 
 - **The B01 map format** — the room grid is LZ4-compressed; path/position arrive as protocol-301
-  frames. Decoded end-to-end into a labeled floor plan, with the path↔grid georeference solved.
+  frames. Decoded end-to-end into a labeled floor plan — grid dimensions read from the frame header,
+  and the path↔grid registration auto-fit per map (the origin isn't transmitted in the stream).
   → [DESIGN_NOTES.md](DESIGN_NOTES.md), [`decode_map.py`](decode_map.py)
 - **The cloud write path** — room-clean and schedule writes go through a REST `/jobs` call that needs
   **Hawk *body* signing**; getting that wrong looks exactly like "writes don't work / token scope,"
@@ -157,9 +158,10 @@ fire-and-forget (no response body); `raw` is the escape hatch for features witho
 
 - **Cloud-only.** No local control for this model (B01 protocol).
 - **Map.** `vac.py map` renders the room grid (colour-coded, room-name-labeled). The grid streams
-  even while docked; the cleaning path + live position only stream *during* a clean. Georeference is
-  solved (`map_overlay.png`); obstacles are cloud-only (not in this data) — the library exposes none
-  of this natively.
+  even while docked; the cleaning path + live position only stream *during* a clean. Georeference:
+  grid dimensions come from the frame header, and the path↔grid origin (not transmitted in the stream)
+  is auto-fit per capture → `map_overlay.png`. Obstacles are cloud-only (not in this data) — the
+  library exposes none of this natively.
 - **Room cleaning** (`clean-rooms`) issues a one-time REST `/jobs` clean for the named rooms;
   `--dry-run` posts an inert *disabled* job. A complete cycle (undock → clean → dock → charging) is
   validated live. The job fires **~2 min later** (scheduled, not instant). See [DESIGN_NOTES.md](DESIGN_NOTES.md).
