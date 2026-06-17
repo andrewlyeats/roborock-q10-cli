@@ -77,8 +77,10 @@ which is why the first two panels are unlabeled.
    Read whole 4-byte pairs and **ignore a trailing remainder of ≤ 2 bytes**. ⚠️ The header `point_count`
    can read **one higher** than the pairs actually present (this frame: count = 407, but 406 pairs +
    2 spare bytes). **Do not shift the start offset to "fix" the count** — byte 16 is correct (its points
-   land **100 %** on floor cells once georeferenced); reading from byte 14 matches the count but
-   **transposes the pairing** and the on-floor rate falls to ~91 %. Last point = current robot position;
+   land **≈100 %** on floor cells once georeferenced — see the georeference worked example below). Two
+   shifts were tried and reverted: reading from byte **14** matches the count but **transposes the
+   pairing** (on-floor rate falls to ~91 %), and a forward shift to byte **18** (s23) transposes it too —
+   both confirm byte 16. Last point = current robot position;
    first ≈ dock. *Some firmware prepends one spurious `~(0, −1907)` point — drop `points[0]` only if its
    step to `points[1]` exceeds **20× the median step** of the path (a deterministic band-aid). The
    sentinel's meaning, and how to detect the firmware era from the frame, are both unresolved — we have
@@ -87,10 +89,16 @@ which is why the first two panels are unlabeled.
 ### Georeference — overlaying a path on a grid
 
 9. A path point `(x, y)` mm → grid cell: **`col = (y − oy) // res`, `row = (ox − x) // res`**, with
-   **`res = 20` mm/px**. The origin `(ox, oy)` is **not** in the frame (verified by exhaustive header
-   search). Recover it by **auto-fit**: choose the `(ox, oy)` that lands the most path points on floor
-   cells. For a multi-frame run, fit once on the largest frame and align the others by grid overlap — that
-   is exactly what makes the three panels above share a single coordinate frame.
+   **`res = 20` mm/px** (note the 90° map: grid **col** comes from path **y**, grid **row** from path
+   **x**, and the row axis is **inverted**). The origin `(ox, oy)` is **not** in the frame (verified by
+   exhaustive header search). Recover it by **auto-fit**: choose the `(ox, oy)` that lands the most path
+   points on floor cells. For a multi-frame run, fit once on the largest frame and align the others by grid
+   overlap — that is exactly what makes the three panels above share a single coordinate frame. *(Worked
+   example: on the s26 capture the fit recovered **`ox = 1001`, `oy = −3307` mm** — these are
+   `decode_map.py`'s `GRID_ORIGIN_OX` / `GRID_ORIGIN_OY`; mind the sign, `oy` is **negative** in this
+   `col = (y − oy)` convention — and it landed **99.87 %** of path points on floor cells. Those constants
+   are **per install** — dock-anchored, stable until the dock moves or the map is reset — not universal;
+   re-fit for your own home.)* ✅ `s25,s26`
 
 ## `0101` grid-frame header — field reference
 
@@ -99,7 +107,7 @@ which is why the first two panels are unlabeled.
 | 0–1 | `sub_type` = `0x0101` | u16 BE | ✅ | Grid-frame magic. Path frames use `0x0201`. |
 | 2–5 | `map_id` | u32 BE | ✅ | Per-map id. Constant for a given map ⇒ it identifies the map, not geometry. Redacted here as `<map-id>`. |
 | 6 | `map_segmented` flag | u8 | 🟡 | **`0` while the map is still building (unsegmented), `1` once it's finalized into rooms.** Verified `byte6==1 ⟺ rooms>0` on **89/89** frames of this build (it flips the instant the 3 room records appear). Earlier captures only ever saw *built* maps, so it looked like a constant `0x01`. |
-| 7–8 | `width` | u16 BE | ✅ | Grid width px. Verified `==` empirical row-stride on 424/424 frames (s25). |
+| 7–8 | `width` | u16 BE | ✅ | Grid width px. Verified `==` empirical row-stride on 424/424 frames (s25). *(Historical: reading these as **LE** at `bytes[8:10]` gave a spurious `478` — the same bytes mis-offset + mis-endianned, not a separate field; the correct read is BE at `[7:9]`/`[9:11]`.)* |
 | 9–10 | `height` | u16 BE | ✅ | Grid height px. |
 | 11–24 | header block | 14 B | 🟡 | **No bounding-box / origin is encoded here** (exhaustive search, s25). Observed sub-structure: `[11]=0x04` (steady state; `0x00`/`0x02` in the first few tiny build frames) · `[12–13]=0x6901` per-map · `[14] ≈ 10×height` · `[15]=0` · `[16]=0x05` const · `[17]` session/mode flag · `[18–21]` per-frame scan-progress counter · `[22]` per-frame · `[23–24]=0`. |
 | 25–26 | `declared_size` | u16 BE | ✅ | Decompressed size = `width × height` + trailing room records. |
@@ -116,7 +124,7 @@ which is why the first two panels are unlabeled.
 | 4–7 | unknown | 4 B | ⬜ | Four bytes. |
 | 8–9 | `point_count` | u16 BE | ✅ | Number of path points. ⚠️ may read **one higher** than the pairs actually present (see decode step 8). |
 | 10–15 | header tail | 6 B | ⬜ | Six bytes; completes the 16-byte header. |
-| 16 … | `points` | int16[] (x,y) | ✅ | BE int16 (x, y) mm pairs (read to end; ignore a ≤2-byte remainder; **don't** shift the offset — byte 16 georeferences 100 %, byte 14 → ~91 %). Last = robot position; first ≈ dock. 0x11+ firmware prepends a spurious `~(0, −1907)` sentinel (stripped; meaning unknown). |
+| 16 … | `points` | int16[] (x,y) | ✅ | BE int16 (x, y) mm pairs (read to end; ignore a ≤2-byte remainder; **don't** shift the offset — byte 16 georeferences ≈100 %; byte 14 → ~91 %, byte 18 also transposes). Last = robot position; first ≈ dock. 0x11+ firmware prepends a spurious `~(0, −1907)` sentinel (stripped; meaning unknown). |
 
 ## Open questions (visible in this very capture)
 

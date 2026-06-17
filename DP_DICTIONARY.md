@@ -219,15 +219,22 @@ water off, vacuum-only, daily route, 1 pass, completed.
 The robot **spontaneously publishes `map_response` (protocol 301) binary frames** — no
 request needed. These are NOT `dps` frames, so `watch`/`watch --raw` never see them (the
 dps decoder drops them). Use **`vac.py map`** (one-shot capture + render), or `watch
---bytes` + `decode_map.py` for the raw stream. Two sub-types, keyed by the first 8 header
-bytes — note they have **different availability**: the room grid streams **even while
-docked**, but the path/position only streams **during an active clean** (confirmed
-2026-06-12):
+--bytes` + `decode_map.py` for the raw stream. Two sub-types, keyed by the **first 2 header
+bytes** (`0x0101` grid / `0x0201` path) — note they have **different availability**: the
+room grid streams **even while docked**, but the path/position only streams **during an
+active clean** (confirmed 2026-06-12):
 
-| sub-type (hdr[:8]) | size | meaning | status |
+| sub-type | size | summary (full byte spec → [FRAME_ANATOMY.md](FRAME_ANATOMY.md)) | status |
 |---|---|---|---|
-| `0201000800020000` | ~23KB | **cleaning path** — 16B header (bytes 8-9 = point count), then big-endian int16 (x,y) pairs. Last point = **robot's current position**; first ≈ dock. **Units = mm** (confirmed: polyline 256m × 0.2m lane ≈ CLEAN_AREA). Path is decimated (≈20mm median vertex spacing) so it's reliable for route + position, but cumulative length underestimates true travel → don't derive cruise speed from it. | ✅ decoded |
-| `0101<map-id><ver>` | ~7.7KB | **room/occupancy grid — LZ4-compressed** (not RLE). declared size=bytes[25:27] BE; comp len=bytes[27:29] BE; LZ4 block from byte 29. Decompresses to an occupancy grid (`pixel//4 = room_id`; 243=outside, 249=wall) + trailing room records (`[0x01,count]` then count×47B; name = byte26 len + bytes27..). **Decoded + rendered** by `decode_map.py` → `map_rooms.png` + `map_overlay.png` (colour-coded, labeled, path overlaid). *Our single-floor capture: a 222×261 grid with 7 named rooms — grid dimensions vary per map/home.* **Grid W/H — read straight from the header (✅ s25):** `raw[7:9]`=W, `raw[9:11]`=H, both **BE u16**, verified == empirical row-stride detection on **424/424** frames (`decode_map.grid_dims_from_header`); the old empirical `find_width` is now only a fallback. *(Historical: an earlier read of `bytes[8:10]` as **LE** u16 gave 478 — that is the SAME bytes mis-offset + mis-endianned, not a separate field; corrected s25. Don't reinstate the empirical-only story.)* **Header byte `[6]` = a map-segmented / finalized flag (🟡 s26):** `0` while the map is still building (unsegmented), `1` once it is finalized into rooms — verified `byte6==1 ⟺ rooms>0` on **89/89** frames of a from-scratch build; earlier captures only saw *built* maps (always `1`), so it was previously mislabeled "constant `0x01`". `raw[11:25]` is mostly-constant metadata that does NOT encode bounding-box coordinates (`[11]≈0x04`, `[12:13]=0x6901` per-map, `[16]=0x05`, `[18:21]` a per-frame scan-progress counter). **Georeference (origin auto-fit per capture; constants below are one example install):** `col=(path_y+Cy)//20`, `row=(Cx−path_x)//20`, row-axis y-inverted, ≈20 mm/px; `Cx`/`Cy` are dock-anchored constants **per install** (our capture: Cx=1001, Cy=3307). Score 99.87 %; stable while the dock position is unchanged. | ✅ decoded + rendered + georeferenced |
+| `0x0201` path | ~23KB | 16B header (bytes 8-9 = point count), then BE int16 (x,y) **mm** pairs; last point = **robot position**, first ≈ dock; decimated (~20mm vertices) so it's reliable for route/position but cumulative length underestimates true travel → don't derive speed. *(example header `0201000800020000`; bytes 2-7 vary per clean.)* | ✅ decoded |
+| `0x0101` grid | ~7.7KB | LZ4-compressed occupancy grid (`pixel//4=room_id`, 243=outside, 249=wall) + trailing room-name records; W/H read from the header; byte `[6]` = map-finalized flag. **Rendered** by `decode_map.py` → `map_rooms.png` + `map_overlay.png` (colour-coded, labeled, path overlaid). *(our main single-floor map: 222×261 px, 7 named rooms — varies per home; example header `0101<map-id><ver>`, bytes 2-5 = per-map id.)* | ✅ decoded + rendered + georeferenced |
+
+**→ Full byte-level decode is single-sourced in [FRAME_ANATOMY.md](FRAME_ANATOMY.md)** — every offset, the
+declared/compressed-size fields, the 47-byte room-record layout, the W/H `424/424` and byte-`[6]` `89/89`
+verifications, the `raw[11:25]` sub-structure, the historical `bytes[8:10]`-as-LE→`478` correction, and the
+georeference algorithm + per-install origin (≈99.87 % on-floor fit). Machine-checkable header
+schema: [frames.ksy](frames.ksy). *(This dictionary catalogs DPs; the frame format lives there so it has one
+home.)*
 
 ### Obstacles are NOT in the map data (checked 2026-06-12)
 AI-recognized obstacles (cable/shoe/pet icons + photos in the app) are **cloud-side**,

@@ -7,7 +7,8 @@ The robot streams protocol-301 `map_response` frames over MQTT *while cleaning*
 dps decoder only accepts protocol-102 JSON), so `watch --bytes` is how we capture
 them. This tool decodes them.
 
-Two 301 sub-types, distinguished by their first 8 header bytes:
+Two 301 sub-types, distinguished by their 2-byte sub-type prefix (`0101`/`0201`);
+the 8-byte example headers below show the surrounding constant/per-map bytes:
   • 0201000800020000  — the CLEANING PATH. Big-endian int16 (x,y) pairs after a
     16-byte header (bytes 8-9 = point count). Units = mm; LAST point = robot's
     current position; first ≈ dock. Rendered to an SVG polyline.
@@ -16,8 +17,9 @@ Two 301 sub-types, distinguished by their first 8 header bytes:
     Header: declared size = bytes[25:27] BE, comp len = bytes[27:29] BE, LZ4 block
     from byte 29. Decompresses to a width×height grid (`pixel//4 = room_id`,
     243=outside, 249=wall) followed by room records (`[0x01,count]` then count×47B;
-    name length at record byte 26, name from byte 27). Grid width is found
-    empirically (the row stride that makes vertically-adjacent rows most similar).
+    name length at record byte 26, name from byte 27). Grid width/height are read
+    from the header (`raw[7:9]`/`raw[9:11]` BE u16; the empirical row-stride that
+    makes vertically-adjacent rows most similar is now only a fallback).
     Rendered to a colour-coded PNG with room-name labels.
     Format credit: v1b3c0d3x3r/roborock-qseries-map-bridge (prior art).
 

@@ -5,8 +5,10 @@
 
 Every interaction the robot exposes (all 114 `B01_Q10_DP` data-points + library traits),
 scoped by what we can and can't do. Built 2026-06-12 from live testing + source/web research;
-**refreshed 2026-06-15** with s21–s24 (single-connection daemon, a complete live clean cycle,
-the settings matrix, STATUS↔mode mapping, and offline `history --from-capture`).
+**last refreshed 2026-06-16** — s21–s24 (single-connection daemon, a complete live clean cycle,
+the settings matrix, STATUS↔mode mapping, and offline `history --from-capture`), plus s25–s26
+(grid dimensions read from the frame header, the no-mop zone `0x02` ground-truth, and the
+multi-map op surface `list`/`update`/`select`).
 
 **Legend.** This table tracks a **capability axis** (can / can't / untested) — *distinct* from the
 4-tier **confidence** key in [PROTOCOL.md](PROTOCOL.md) (Confirmed / Plausible / Reported / Unknown).

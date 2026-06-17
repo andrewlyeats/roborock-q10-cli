@@ -32,7 +32,7 @@ and the staleness signal: if your firmware is newer, treat it as advisory.
 ## Overview
 
 The Q10 S5+ is a **"B01" device: cloud-only.** There is no local-network control path (confirmed — see
-[local control](#why-no-local-path)); every command is relayed through Roborock's cloud over **MQTT**, with a
+[local control](DESIGN_NOTES.md#why-cloud-only)); every command is relayed through Roborock's cloud over **MQTT**, with a
 **REST** API for onboarding, schedules, and one-time room cleans. The live map/path arrives as a spontaneous
 binary **MQTT protocol-301** stream while cleaning. ✅ `fw 03.11.24, s5–s26`
 
