@@ -1,0 +1,37 @@
+# Conservative systemd --user unit for the Roborock single-connection daemon.
+#
+# FAIL-STOP by design: it is FAR better for this to stop and wait for you than to auto-restart
+# into the account-level rate-limit (`135`), which also locks out the phone app. So it runs with
+# --careful (halt on the first rate-limit/auth complaint, do not reconnect), and it does NOT
+# restart on any cloud-risk exit — only on an unexpected crash, and even that is capped.
+#
+# Install (per-user):
+#   1. edit ExecStart below to your checkout path
+#   2. cp roborock-vac.service ~/.config/systemd/user/
+#   3. systemctl --user daemon-reload && systemctl --user enable --now roborock-vac
+#   status/logs:  systemctl --user status roborock-vac   ·   journalctl --user -u roborock-vac
+#
+# `vac.py daemon run` exits 75 (rate-limit/135), 77 (creds revoked → run `vac.py login`), or
+# 69 (cloud unreachable) on cloud-risk conditions; RestartPreventExitStatus below means none of
+# those ever auto-restart. This is a minor convenience feature; it is intentionally fail-stop.
+
+[Unit]
+Description=Roborock Q10 (B01) single-connection daemon
+Documentation=https://github.com/andrewlyeats/roborock-q10-cli
+After=network-online.target
+Wants=network-online.target
+# Backstop: even on a genuine crash, never restart more than 3x/hour (can't storm the broker).
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+# EDIT this to your checkout. Must be a Python >=3.11 interpreter with the deps installed.
+ExecStart=%h/path/to/vac.py daemon run --careful
+# Only restart on an unexpected crash (exit 1); never on a clean stop (0) or a cloud-risk exit:
+Restart=on-failure
+RestartPreventExitStatus=69 75 77
+RestartSec=120
+
+[Install]
+WantedBy=default.target

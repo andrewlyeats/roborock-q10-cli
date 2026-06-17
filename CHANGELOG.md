@@ -5,9 +5,9 @@ Notable changes to this project. Format loosely follows
 undocumented cloud protocol and relies on `python-roborock` internals, each release notes the
 environment it was **validated against** — check that before trusting it on a newer stack.
 
-## [Unreleased]
+## [0.1.0] — 2026-06-17
 
-Initial public release candidate.
+First public release — the reverse-engineering reference + CLI for the Roborock Q10 (B01) cloud protocol.
 
 ### Validated against
 - Device: Roborock Q10 S5+ (B01 protocol), firmware **03.11.24**
@@ -21,6 +21,11 @@ Initial public release candidate.
 - Cloud schedules: `list` / `add` / `enable` / `disable` / `delete`.
 - Offline map decode + render (`decode_map.py`, `vac.py map`): room grid, cleaning path, georeference.
 - Single-connection daemon to avoid the account-level MQTT connection rate-limit (`code 135`).
+- **Structured output** for scripting / dashboards — `decode_map.py --json` (map + rooms + robot
+  position/current-room + georeference), `status` / `consumables --json`, `watch --raw` (JSONL), and a
+  machine-readable `datapoints.json` index of every data-point.
+- **Installable** — `pip install .` (PEP 621 `pyproject.toml`, enforces Python ≥3.11) with a `vac`
+  console command; an optional fail-stop `systemd --user` unit for headless use.
 
 ### Added
 - **`history --from-capture <file>`** — decode the robot's clean history (date / duration / area / water /
@@ -28,6 +33,19 @@ Initial public release candidate.
   broadcasts its history (`CLEAN_RECORD` op:list) on the device topic, so a capture taken while the phone
   app opens its History screen contains the full back-catalog. (The *live* op:list pull is app/push-only —
   still WIP.) 12-field format cross-validated against an 18-record corpus; covered by `test_history.py`.
+- **Machine-consumable map decode** — `decode_map.py --json` emits grid + georeference, rooms (pixel
+  bbox/centroid), the robot's **current position + derived room** (last path point → georeference → grid
+  cell → room), and the path as structured data (schema `roborock-b01-map/1`) — so a status panel / web UI /
+  Home Assistant shell command can use the decode without parsing a PNG. Covered by `test_decode_map.py`.
+- **`datapoints.json`** — a generated, machine-readable index of all 114 B01 data-points + the `YX*` value
+  enums (`gen_datapoints.py`; drift-guarded by `test_datapoints.py`). `DP_DICTIONARY.md` stays the reference
+  for meanings, confidence tiers, and provenance.
+- **Packaging** — a PEP 621 `pyproject.toml` (`pip install .`, `vac` + `roborock-decode-map` scripts) that
+  enforces Python ≥3.11, so `pip` refuses the 3.9/3.10 silent-`0.x` downgrade instead of installing a
+  B01-less library. `requirements.lock.txt` remains the byte-reproducible pin.
+- **Headless daemon support** — a conservative, fail-stop `roborock-vac.service` (`systemd --user`) and
+  distinct daemon exit codes (rate-limit `75` / revoked-creds `77` / unreachable `69`) so a service or
+  monitor can react; it stops rather than risk the `135` rate-limit (`test_daemon_exit.py`).
 
 ### Fixed
 - **Daemon `watch`/stream now works.** The stream handler sent its head through a helper that closed the

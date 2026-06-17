@@ -33,6 +33,11 @@ These capabilities are implemented and validated against a live device:
 - **Map decode & render** — decode the robot's streamed map into a colour-coded, room-labeled
   floor plan and a cleaning-path overlay (georeferenced). Works while docked for the floor
   plan; live robot position is available during an active clean.
+- **Structured map/position output** — `decode_map.py --json` emits the decode as data (rooms with
+  pixel bbox/centroid, robot position + derived current room, the path, and the georeference
+  transform; schema `roborock-b01-map/1`) so a status panel / web UI / Home Assistant shell command
+  can consume it without parsing a PNG. Plus `datapoints.json`, a machine-readable index of all 114
+  data-points + value enums. *(We provide the data; you build the view.)*
 - **Live telemetry stream** — `watch` follows the device in real time (optional CSV/JSONL
   output) and projects a clean ETA and battery-to-finish estimate.
 - **Scalar settings** — set runtime parameters like fan, water, and clean mode.

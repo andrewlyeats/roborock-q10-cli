@@ -276,6 +276,16 @@ PID_PATH  = pathlib.Path("~/.roborock_vacd.pid").expanduser()
 LOG_PATH  = pathlib.Path("~/.roborock_vacd.log").expanduser()
 HALT_PATH = pathlib.Path("~/.roborock_vacd.halt").expanduser()   # why a careful-mode daemon stopped
 
+# Daemon process exit codes (sysexits.h-style) — surfaced by `daemon run` so systemd / a
+# monitor can react. Posture is fail-STOP on anything cloud-risky: better to stop and let a
+# human look than auto-restart into a possible ban. A unit should only ever restart on
+# EXIT_CRASH, and cap even that. (Inert for `daemon start`, which detaches `run`.) See roborock-vac.service.
+EXIT_CLEAN       = 0    # deliberate stop (SIGTERM / `daemon stop`)
+EXIT_CRASH       = 1    # unexpected exception
+EXIT_UNREACHABLE = 69   # EX_UNAVAILABLE — never reached the cloud (startup connect failed, non-auth)
+EXIT_THROTTLED   = 75   # EX_TEMPFAIL  — rate-limit/135 or careful-mode throttle halt; WAIT, do not hammer
+EXIT_NEEDS_LOGIN = 77   # EX_NOPERM    — credentials revoked / interactive login required; do NOT loop
+
 # Set by the running daemon to (device, props); makes device_session reuse the held
 # session instead of opening a new one. None in the standalone/--force path.
 _INJECTED_SESSION = None
@@ -1989,6 +1999,23 @@ class Daemon:
             eof.cancel()
             self.watchers.discard(q)
 
+    def exit_status(self) -> int:
+        """Process exit code reflecting WHY the daemon stopped (fail-STOP on cloud-risk; see the
+        EXIT_* constants + roborock-vac.service). Keys off the reliable state flags, with the last-error
+        class as a tiebreaker. Only EXIT_CRASH (an unexpected exception, handled in cmd_daemon) should
+        ever be auto-restarted."""
+        if self.needs_login:                      # supervisor gave up → creds likely revoked
+            return EXIT_NEEDS_LOGIN
+        cls = (self.last_error or {}).get("class")
+        if cls == "auth":                         # 401/403/invalid-token → re-login, don't loop
+            return EXIT_NEEDS_LOGIN
+        if self.unauthorized or getattr(self, "halt_reason", None) \
+                or cls in ("mqtt-throttle(135)", "rest-rate-limit"):
+            return EXIT_THROTTLED                 # rate-limit/135 → WAIT, do not hammer
+        if not getattr(self, "_opened", False) and self.last_error:
+            return EXIT_UNREACHABLE               # never reached the cloud (startup connect failed)
+        return EXIT_CLEAN                         # deliberate stop
+
     async def serve(self):
         self.started_at = datetime.now()
         try:
@@ -2008,6 +2035,7 @@ class Daemon:
         server = await asyncio.start_unix_server(self._handle, path=str(SOCK_PATH))
         os.chmod(SOCK_PATH, 0o600)
         PID_PATH.write_text(str(os.getpid()))
+        self._opened = True   # reached a live, serving state (distinguishes startup-fail from a later stop)
         _log(f"daemon up: {getattr(self.device,'name','?')} on {SOCK_PATH}")
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -2165,13 +2193,17 @@ def _daemon_alive():
 
 def cmd_daemon(rest):
     sub = rest[0] if rest else "status"
-    if sub == "run":                      # foreground server (what `start` launches)
+    if sub == "run":                      # foreground server (what `start` launches, and what a systemd unit runs)
         require_creds()
+        daemon = Daemon(None, careful="--careful" in rest)
         try:
-            asyncio.run(Daemon(None, careful="--careful" in rest).serve())
+            asyncio.run(daemon.serve())
         except KeyboardInterrupt:
-            pass
-        return
+            pass                          # Ctrl-C — a deliberate stop
+        except Exception:
+            _log("daemon crashed:\n" + traceback.format_exc())
+            sys.exit(EXIT_CRASH)          # 1 — unexpected; a systemd unit may restart this (bounded)
+        sys.exit(daemon.exit_status())    # fail-STOP codes on cloud-risk (see exit_status / roborock-vac.service)
     if sub == "start":
         if _daemon_alive():
             print("daemon already running."); return

@@ -1,0 +1,979 @@
+{
+  "schema": "roborock-b01-q10-datapoints/1",
+  "generated_by": "gen_datapoints.py (from python-roborock B01_Q10_DP + YX* enums)",
+  "note": "Names/keys/enum labels are authoritative (the library). MEANINGS, confidence tiers, numeric codes, provenance, and open questions live in DP_DICTIONARY.md — the canonical reference; this file is the machine-readable index only (the DP-layer analog of frames.ksy).",
+  "datapoint_count": 114,
+  "documented_count": 103,
+  "datapoints": [
+    {
+      "name": "ADD_CLEAN_AREA",
+      "key": "dpAddCleanArea",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "ADD_CLEAN_STATE",
+      "key": "dpAddCleanState",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "AREA_UNIT",
+      "key": "dpAreaUnit",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "AUTO_BOOST",
+      "key": "dpAutoBoost",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "BACK_TYPE",
+      "key": "dpBackType",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "BATTERY",
+      "key": "dpBattery",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "BEAK_CLEAN",
+      "key": "dpBeakClean",
+      "code": null,
+      "documented": false
+    },
+    {
+      "name": "BREAKPOINT_CLEAN",
+      "key": "dpBreakpointClean",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "BUTTON_LIGHT_SWITCH",
+      "key": "dpButtonLightSwitch",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CARPET_CLEAN_PREFER",
+      "key": "dpCarpetCleanPrefer",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CARPET_CLEAN_TYPE",
+      "key": "dpCarpetCleanType",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CARPET_UP",
+      "key": "dpCarpetUp",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CHILD_LOCK",
+      "key": "dpChildLock",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CLEANING_PROGRESS",
+      "key": "dpCleaningProgress",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CLEAN_AREA",
+      "key": "dpCleanArea",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CLEAN_COUNT",
+      "key": "dpCleanCount",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CLEAN_EXPAND",
+      "key": "dpCleanExpand",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CLEAN_LINE",
+      "key": "dpCleanLine",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CLEAN_MODE",
+      "key": "dpCleanMode",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CLEAN_ORDER",
+      "key": "dpCleanOrder",
+      "code": null,
+      "documented": false
+    },
+    {
+      "name": "CLEAN_PROGRESS",
+      "key": "dpCleanProgress",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CLEAN_RECORD",
+      "key": "dpCleanRecord",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CLEAN_TASK_TYPE",
+      "key": "dpCleanTaskType",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CLEAN_TIME",
+      "key": "dpCleanTime",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CLIFF_RESTRICTED_AREA",
+      "key": "dpCliffRestrictedArea",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CLIFF_RESTRICTED_AREA_UP",
+      "key": "dpCliffRestrictedAreaUp",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "COMMON",
+      "key": "dpCommon",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CREATE_MAP_FINISHED",
+      "key": "dpCreateMapFinished",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CUSTOMER_CLEAN",
+      "key": "dpCustomerClean",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "CUSTOMER_CLEAN_REQUEST",
+      "key": "dpCustomerCleanRequest",
+      "code": null,
+      "documented": false
+    },
+    {
+      "name": "CUSTOM_MODE",
+      "key": "dpCustomMode",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "DEVICE_INFO",
+      "key": "dpDeviceInfo",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "DUST_SETTING",
+      "key": "dpDustSetting",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "DUST_SWITCH",
+      "key": "dpDustSwitch",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "FAN_LEVEL",
+      "key": "dpFanLevel",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "FAULT",
+      "key": "dpFault",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "FILTER_LIFE",
+      "key": "dpFilterLife",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "FLEEING_GOODS",
+      "key": "dpFleeingGoods",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "FLOOR_MATERIAL",
+      "key": "dpFloorMaterial",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "GET_CARPET",
+      "key": "dpGetCarpet",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "GROUND_CLEAN",
+      "key": "dpGroundClean",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "HEARTBEAT",
+      "key": "dpHeartbeat",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "IGNORE_OBSTACLE",
+      "key": "dpIgnoreObstacle",
+      "code": null,
+      "documented": false
+    },
+    {
+      "name": "JUMP_SCAN",
+      "key": "dpJumpScan",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "LINE_LASER_OBSTACLE_AVOIDANCE",
+      "key": "dpLineLaserObstacleAvoidance",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "LOG_SWITCH",
+      "key": "dpLogSwitch",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "MAIN_BRUSH_LIFE",
+      "key": "dpMainBrushLife",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "MAP_RESET",
+      "key": "dpMapReset",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "MAP_SAVE_SWITCH",
+      "key": "dpMapSaveSwitch",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "MOP_STATE",
+      "key": "dpMopState",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "MULTI_MAP",
+      "key": "dpMultiMap",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "MULTI_MAP_SWITCH",
+      "key": "dpMultiMapSwitch",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "NET_INFO",
+      "key": "dpNetInfo",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "NOT_DISTURB",
+      "key": "dpNotDisturb",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "NOT_DISTURB_DATA",
+      "key": "dpNotDisturbData",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "NOT_DISTURB_EXPAND",
+      "key": "dpNotDisturbExpand",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "OFFLINE",
+      "key": "dpOffline",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "PAUSE",
+      "key": "dpPause",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "RAG_LIFE",
+      "key": "dpRagLife",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "RECENT_CLEAN_RECORD",
+      "key": "dpRecentCleanRecord",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "REMOTE",
+      "key": "dpRemote",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "REMOVE_ZONED",
+      "key": "dpRemoveZoned",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "REMOVE_ZONED_UP",
+      "key": "dpRemoveZonedUp",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "REQUEST",
+      "key": "dpRequest",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "REQUEST_DPS",
+      "key": "dpRequestDps",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "REQUEST_NOT_DISTURB_DATA",
+      "key": "dpRequestNotDisturbData",
+      "code": null,
+      "documented": false
+    },
+    {
+      "name": "REQUEST_TIMER",
+      "key": "dpRequestTimer",
+      "code": null,
+      "documented": false
+    },
+    {
+      "name": "RESET_FILTER",
+      "key": "dpResetFilter",
+      "code": null,
+      "documented": false
+    },
+    {
+      "name": "RESET_MAIN_BRUSH",
+      "key": "dpResetMainBrush",
+      "code": null,
+      "documented": false
+    },
+    {
+      "name": "RESET_RAG_LIFE",
+      "key": "dpResetRagLife",
+      "code": null,
+      "documented": false
+    },
+    {
+      "name": "RESET_ROOM_NAME",
+      "key": "dpResetRoomName",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "RESET_SENSOR",
+      "key": "dpResetSensor",
+      "code": null,
+      "documented": false
+    },
+    {
+      "name": "RESET_SIDE_BRUSH",
+      "key": "dpResetSideBrush",
+      "code": null,
+      "documented": false
+    },
+    {
+      "name": "RESTRICTED_AREA",
+      "key": "dpRestrictedArea",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "RESTRICTED_AREA_UP",
+      "key": "dpRestrictedAreaUp",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "RESTRICTED_ZONE",
+      "key": "dpRestrictedZone",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "RESTRICTED_ZONE_UP",
+      "key": "dpRestrictedZoneUp",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "RESUME",
+      "key": "dpResume",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "ROBOT_COUNTRY_CODE",
+      "key": "dpRobotCountryCode",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "ROBOT_TYPE",
+      "key": "dpRobotType",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "ROOM_MERGE",
+      "key": "dpRoomMerge",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "ROOM_SPLIT",
+      "key": "dpRoomSplit",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "SEEK",
+      "key": "dpSeek",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "SELF_IDENTIFYING_CARPET",
+      "key": "dpSelfIdentifyingCarpet",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "SENSOR_LIFE",
+      "key": "dpSensorLife",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "SIDE_BRUSH_LIFE",
+      "key": "dpSideBrushLife",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "START_BACK",
+      "key": "dpStartBack",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "START_CLEAN",
+      "key": "dpStartClean",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "START_DOCK_TASK",
+      "key": "dpStartDockTask",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "STATUS",
+      "key": "dpStatus",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "STOP",
+      "key": "dpStop",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "SUSPECTED_THRESHOLD",
+      "key": "dpSuspectedThreshold",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "SUSPECTED_THRESHOLD_UP",
+      "key": "dpSuspectedThresholdUp",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "TASK_CANCEL_IN_MOTION",
+      "key": "dpTaskCancelInMotion",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "TIMER",
+      "key": "dpTimer",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "TIMER_TYPE",
+      "key": "dpTimerType",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "TIME_ZONE",
+      "key": "dpTimeZone",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "TOTAL_CLEAN_AREA",
+      "key": "dpTotalCleanArea",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "TOTAL_CLEAN_COUNT",
+      "key": "dpTotalCleanCount",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "TOTAL_CLEAN_TIME",
+      "key": "dpTotalCleanTime",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "UNIT",
+      "key": "dpUnit",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "USER_PLAN",
+      "key": "dpUserPlan",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "VALLEY_POINT_CHARGING",
+      "key": "dpValleyPointCharging",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "VALLEY_POINT_CHARGING_DATA",
+      "key": "dpValleyPointChargingData",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "VALLEY_POINT_CHARGING_DATA_UP",
+      "key": "dpValleyPointChargingDataUp",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "VIRTUAL_WALL",
+      "key": "dpVirtualWall",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "VIRTUAL_WALL_UP",
+      "key": "dpVirtualWallUp",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "VOICE_LANGUAGE",
+      "key": "dpVoiceLanguage",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "VOICE_PACKAGE",
+      "key": "dpVoicePackage",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "VOICE_VERSION",
+      "key": "dpVoiceVersion",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "VOLUME",
+      "key": "dpVolume",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "WATER_LEVEL",
+      "key": "dpWaterLevel",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "ZONED",
+      "key": "dpZoned",
+      "code": null,
+      "documented": true
+    },
+    {
+      "name": "ZONED_UP",
+      "key": "dpZonedUp",
+      "code": null,
+      "documented": true
+    }
+  ],
+  "value_enums": {
+    "YXBackType": [
+      {
+        "name": "UNKNOWN",
+        "value": "unknown"
+      },
+      {
+        "name": "IDLE",
+        "value": "idle"
+      },
+      {
+        "name": "BACK_DUSTING",
+        "value": "backdusting"
+      },
+      {
+        "name": "BACK_CHARGING",
+        "value": "backcharging"
+      }
+    ],
+    "YXCleanLine": [
+      {
+        "name": "FAST",
+        "value": "fast"
+      },
+      {
+        "name": "DAILY",
+        "value": "daily"
+      },
+      {
+        "name": "FINE",
+        "value": "fine"
+      }
+    ],
+    "YXCleanType": [
+      {
+        "name": "UNKNOWN",
+        "value": "unknown"
+      },
+      {
+        "name": "VAC_AND_MOP",
+        "value": "vac_and_mop"
+      },
+      {
+        "name": "VACUUM",
+        "value": "vacuum"
+      },
+      {
+        "name": "MOP",
+        "value": "mop"
+      },
+      {
+        "name": "CUSTOMIZED",
+        "value": "customized"
+      }
+    ],
+    "YXDeviceCleanTask": [
+      {
+        "name": "UNKNOWN",
+        "value": "unknown"
+      },
+      {
+        "name": "IDLE",
+        "value": "idle"
+      },
+      {
+        "name": "SMART",
+        "value": "smart"
+      },
+      {
+        "name": "ELECTORAL",
+        "value": "electoral"
+      },
+      {
+        "name": "DIVIDE_AREAS",
+        "value": "divideareas"
+      },
+      {
+        "name": "CREATING_MAP",
+        "value": "creatingmap"
+      },
+      {
+        "name": "PART",
+        "value": "part"
+      }
+    ],
+    "YXDeviceDustCollectionFrequency": [
+      {
+        "name": "DAILY",
+        "value": "daily"
+      },
+      {
+        "name": "INTERVAL_15",
+        "value": "interval_15"
+      },
+      {
+        "name": "INTERVAL_30",
+        "value": "interval_30"
+      },
+      {
+        "name": "INTERVAL_45",
+        "value": "interval_45"
+      },
+      {
+        "name": "INTERVAL_60",
+        "value": "interval_60"
+      }
+    ],
+    "YXDeviceState": [
+      {
+        "name": "UNKNOWN",
+        "value": "unknown"
+      },
+      {
+        "name": "SLEEPING",
+        "value": "sleeping"
+      },
+      {
+        "name": "IDLE",
+        "value": "idle"
+      },
+      {
+        "name": "CLEANING",
+        "value": "cleaning"
+      },
+      {
+        "name": "RETURNING_HOME",
+        "value": "returning_home"
+      },
+      {
+        "name": "REMOTE_CONTROL_ACTIVE",
+        "value": "remote_control_active"
+      },
+      {
+        "name": "CHARGING",
+        "value": "charging"
+      },
+      {
+        "name": "PAUSED",
+        "value": "paused"
+      },
+      {
+        "name": "ERROR",
+        "value": "error"
+      },
+      {
+        "name": "UPDATING",
+        "value": "updating"
+      },
+      {
+        "name": "EMPTYING_THE_BIN",
+        "value": "emptying_the_bin"
+      },
+      {
+        "name": "MAPPING",
+        "value": "mapping"
+      },
+      {
+        "name": "SAVING_MAP",
+        "value": "saving_map"
+      },
+      {
+        "name": "RELOCATING",
+        "value": "relocating"
+      },
+      {
+        "name": "SWEEPING",
+        "value": "sweeping"
+      },
+      {
+        "name": "MOPPING",
+        "value": "mopping"
+      },
+      {
+        "name": "SWEEP_AND_MOP",
+        "value": "sweep_and_mop"
+      },
+      {
+        "name": "TRANSITIONING",
+        "value": "transitioning"
+      },
+      {
+        "name": "WAITING_TO_CHARGE",
+        "value": "waiting_to_charge"
+      }
+    ],
+    "YXDeviceWorkMode": [
+      {
+        "name": "UNKNOWN",
+        "value": "unknown"
+      },
+      {
+        "name": "BOTH_WORK",
+        "value": "bothwork"
+      },
+      {
+        "name": "ONLY_SWEEP",
+        "value": "onlysweep"
+      },
+      {
+        "name": "ONLY_MOP",
+        "value": "onlymop"
+      },
+      {
+        "name": "CUSTOMIZED",
+        "value": "customized"
+      },
+      {
+        "name": "SAVE_WORRY",
+        "value": "saveworry"
+      },
+      {
+        "name": "SWEEP_MOP",
+        "value": "sweepmop"
+      }
+    ],
+    "YXFanLevel": [
+      {
+        "name": "UNKNOWN",
+        "value": "unknown"
+      },
+      {
+        "name": "OFF",
+        "value": "off"
+      },
+      {
+        "name": "QUIET",
+        "value": "quiet"
+      },
+      {
+        "name": "BALANCED",
+        "value": "balanced"
+      },
+      {
+        "name": "TURBO",
+        "value": "turbo"
+      },
+      {
+        "name": "MAX",
+        "value": "max"
+      },
+      {
+        "name": "MAX_PLUS",
+        "value": "max_plus"
+      }
+    ],
+    "YXRoomMaterial": [
+      {
+        "name": "HORIZONTAL_FLOOR_BOARD",
+        "value": "horizontalfloorboard"
+      },
+      {
+        "name": "VERTICAL_FLOOR_BOARD",
+        "value": "verticalfloorboard"
+      },
+      {
+        "name": "CERAMIC_TILE",
+        "value": "ceramictile"
+      },
+      {
+        "name": "OTHER",
+        "value": "other"
+      }
+    ],
+    "YXWaterLevel": [
+      {
+        "name": "UNKNOWN",
+        "value": "unknown"
+      },
+      {
+        "name": "OFF",
+        "value": "off"
+      },
+      {
+        "name": "LOW",
+        "value": "low"
+      },
+      {
+        "name": "MEDIUM",
+        "value": "medium"
+      },
+      {
+        "name": "HIGH",
+        "value": "high"
+      }
+    ]
+  }
+}

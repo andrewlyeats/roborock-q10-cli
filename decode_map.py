@@ -41,6 +41,12 @@ Usage:
   ./vac.py watch --raw --out raw.jsonl       # capture DPs (walls, zones) simultaneously
   ./decode_map.py cap.jsonl                  # -> map_path.svg, map_rooms.png, map_overlay.png
   ./decode_map.py cap.jsonl --dps raw.jsonl  # -> overlay includes walls + zones
+  ./decode_map.py cap.jsonl --json           # -> structured data on stdout (no images; pipe to jq)
+
+The `--json` output is the "give others the data" surface (ROADMAP #21): grid dims +
+georeference transform, rooms with pixel geometry, the robot's current position + room,
+the cleaning path, and any wall/zone overlay — so a status panel / web UI / HA shell
+command can consume the decode without parsing a PNG. Schema: `roborock-b01-map/1`.
 """
 import base64
 import json
@@ -553,6 +559,168 @@ def render_overlay_png(grid, W, H, rooms, path_pts, dp_overlay=None, scale=3,
     return img
 
 
+# ── structured (machine-consumable) output ──────────────────────────────────
+
+def room_geometry(grid, W, H):
+    """Per-room pixel geometry from the occupancy grid.
+
+    Returns {room_id: {"bbox_px": [min_col,min_row,max_col,max_row],
+                       "centroid_px": [col,row], "cells": n}}. Pixels are grid cells;
+    use the georeference block to convert to mm. Lets a consumer place room labels /
+    hit-test which room a coordinate is in without re-walking the grid.
+    """
+    geo = {}
+    for i, b in enumerate(grid):
+        if b and b % 4 == 0:
+            rid = b // 4
+            col, row = i % W, i // W
+            g = geo.get(rid)
+            if g is None:
+                geo[rid] = [col, row, col, row, col, row, 1]  # min_c,min_r,max_c,max_r,sum_c,sum_r,n
+            else:
+                g[0] = min(g[0], col); g[1] = min(g[1], row)
+                g[2] = max(g[2], col); g[3] = max(g[3], row)
+                g[4] += col; g[5] += row; g[6] += 1
+    out = {}
+    for rid, g in geo.items():
+        n = g[6]
+        out[rid] = {"bbox_px": [g[0], g[1], g[2], g[3]],
+                    "centroid_px": [round(g[4] / n), round(g[5] / n)], "cells": n}
+    return out
+
+
+def room_at_pixel(grid, W, H, col, row):
+    """room_id at grid (col,row), or None for outside/wall/out-of-bounds."""
+    if not (0 <= col < W and 0 <= row < H):
+        return None
+    b = grid[row * W + col]
+    return b // 4 if (b and b % 4 == 0) else None
+
+
+def robot_room(last_pt, grid, W, H, ox=GRID_ORIGIN_OX, oy=GRID_ORIGIN_OY,
+               res=GRID_MM_PER_PIXEL, search_radius=2):
+    """Map the robot's last path point (mm) → ((col,row), room_id).
+
+    Exact cell first; if the robot sits on a wall/boundary pixel, take the majority
+    room within a few px. Returns ((col,row) or None, room_id or None).
+    """
+    cp = coord_to_pixel(last_pt[0], last_pt[1], W, H, ox, oy, res)
+    if cp is None:
+        return None, None
+    col, row = cp
+    rid = room_at_pixel(grid, W, H, col, row)
+    if rid is None:
+        from collections import Counter
+        votes = Counter()
+        for rad in range(1, search_radius + 1):
+            for dc in range(-rad, rad + 1):
+                for dr in range(-rad, rad + 1):
+                    r = room_at_pixel(grid, W, H, col + dc, row + dr)
+                    if r is not None:
+                        votes[r] += 1
+            if votes:
+                break
+        rid = votes.most_common(1)[0][0] if votes else None
+    return (col, row), rid
+
+
+def build_map_json(cap, dps_path=None):
+    """Decode a `watch --bytes` capture into a structured, machine-consumable dict.
+
+    The "give others the data" surface (ROADMAP #21): a status panel / web UI / HA shell
+    command can consume this instead of parsing a PNG. Coordinate frames — path,
+    robot.position_mm, path.points_mm, and overlay shapes are robot **mm** (path frame);
+    room bbox/centroid and robot.position_px are grid **pixels**; the `georeference`
+    block carries the mm↔pixel transform. Schema id: `roborock-b01-map/1`.
+    """
+    result = {
+        "schema": "roborock-b01-map/1",
+        "source": {"capture": cap},
+        "grid": None, "georeference": None, "rooms": [], "robot": None,
+        "path": None, "overlay": None,
+    }
+    paths = load_frames(cap, PATH_SIG)
+    grids = load_frames(cap, GRID_PREFIX)
+    result["source"]["path_frames"] = len(paths)
+    result["source"]["grid_frames"] = len(grids)
+
+    pts = None
+    if paths:
+        tm, raw = max(paths, key=lambda x: len(x[1]))
+        pts, declared = parse_path(raw)
+        pts = _drop_path_outlier(pts)
+        result["source"]["path_frame_time"] = tm
+        result["path"] = {
+            "point_count": len(pts),
+            "declared_count": declared,
+            "start_mm": list(pts[0]) if pts else None,
+            "robot_mm": list(pts[-1]) if pts else None,
+            "points_mm": [[x, y] for x, y in pts],
+        }
+
+    if grids:
+        tm, raw = max(grids, key=lambda x: len(x[1]))
+        out = decompress_grid(raw)
+        W, H, grid, dsrc = resolve_dims(raw, out)
+        rooms, _ = parse_rooms(out)
+        result["source"]["grid_frame_time"] = tm
+        result["grid"] = {
+            "width": W, "height": H, "dims_source": dsrc, "map_id": raw[2:6].hex(),
+            "cell_legend": {"243": "outside", "249": "wall",
+                            "floor": "v where v%4==0; room_id = v//4"},
+        }
+        geo = room_geometry(grid, W, H)
+        result["rooms"] = [
+            {"id": rid, "name": rooms.get(rid, f"room{rid}"),
+             "bbox_px": geo[rid]["bbox_px"] if rid in geo else None,
+             "centroid_px": geo[rid]["centroid_px"] if rid in geo else None,
+             "cells": geo[rid]["cells"] if rid in geo else 0}
+            for rid in sorted(set(rooms) | set(geo))
+        ]
+
+        ox, oy, res = GRID_ORIGIN_OX, GRID_ORIGIN_OY, GRID_MM_PER_PIXEL
+        fit_method, fit_score = "default", None
+        if pts:
+            fit = fit_origin(grid, W, H, pts)
+            if fit and fit[3] >= 0.90:
+                ox, oy, res, fit_score = fit
+                fit_method = "auto"
+            elif fit:
+                fit_score = fit[3]
+                fit_method = "default(weak-fit)"
+        result["georeference"] = {
+            "origin_mm": {"ox": ox, "oy": oy},
+            "resolution_mm_per_px": res,
+            "fit_method": fit_method,
+            "fit_score": round(fit_score, 4) if fit_score is not None else None,
+            "transform": "col = (path_y - oy) // res ; row = (ox - path_x) // res",
+            "axis_note": "grid col from path y, grid row from path x; row axis inverted; oy is typically negative.",
+            "origin_note": "origin is NOT in the frame — auto-fit per capture; per-install (dock-anchored), stable until the dock moves or the map resets.",
+        }
+
+        if pts:
+            rc, rid = robot_room(pts[-1], grid, W, H, ox, oy, res)
+            result["robot"] = {
+                "position_mm": list(pts[-1]),
+                "position_px": list(rc) if rc else None,
+                "in_grid": rc is not None,
+                "current_room": ({"id": rid, "name": rooms.get(rid, f"room{rid}")}
+                                 if rid is not None else None),
+                "note": "position/room are live only DURING a clean; docked → no path frame is emitted.",
+            }
+
+    if dps_path:
+        ov = load_dp_overlay(dps_path)
+        result["overlay"] = {
+            "walls": [[list(a), list(b)] for a, b in ov["walls"]],
+            "no_go": [[list(p) for p in z] for z in ov["no_go"]],
+            "no_mop": [[list(p) for p in z] for z in ov["no_mop"]],
+            "clean_zones": [[list(p) for p in z] for z in ov["clean_zones"]],
+            "carpets": [[list(p) for p in z] for z in ov["carpets"]],
+        }
+    return result
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -561,19 +729,23 @@ def main():
         print(__doc__)
         sys.exit(0)
 
-    # Parse: decode_map.py <capture.jsonl> [--dps <raw-watch.jsonl>]
+    # Parse: decode_map.py <capture.jsonl> [--dps <raw-watch.jsonl>] [--json]
     dps_path = None
     positional = []
+    json_mode = False
     i = 0
     while i < len(argv):
         if argv[i] == "--dps" and i + 1 < len(argv):
             dps_path = argv[i + 1]
             i += 2
+        elif argv[i] == "--json":
+            json_mode = True
+            i += 1
         else:
             positional.append(argv[i])
             i += 1
     if not positional:
-        print("usage: decode_map.py <capture.jsonl> [--dps <raw-watch.jsonl>]")
+        print("usage: decode_map.py <capture.jsonl> [--dps <raw-watch.jsonl>] [--json]")
         sys.exit(1)
     cap = positional[0]
 
@@ -585,6 +757,12 @@ def main():
                 sys.exit(f"File not found: {f}")
             except OSError as e:
                 sys.exit(f"Cannot read {f}: {e}")
+
+    # Machine-consumable output: structured data on stdout, no images, no chatter
+    # (so `decode_map.py cap.jsonl --json | jq` is clean). See build_map_json / ROADMAP #21.
+    if json_mode:
+        print(json.dumps(build_map_json(cap, dps_path), indent=2))
+        return
 
     dp_overlay = load_dp_overlay(dps_path) if dps_path else None
     if dp_overlay:

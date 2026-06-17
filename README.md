@@ -70,7 +70,8 @@ Firmware updates can drift from what's documented here.
 ## Setup
 
 Needs Python **≥3.11** and the deps in `requirements.txt` (python-roborock, lz4, Pillow):
-`pip install -r requirements.txt` (or `requirements.lock.txt` for the exact known-good pins).
+`pip install -r requirements.txt` (or `requirements.lock.txt` for the exact known-good pins, or
+`pip install .` to use the `pyproject.toml` — which enforces Python ≥3.11 and installs a `vac` command).
 
 > **The one install gotcha:** python-roborock 5.x requires Python ≥3.11. On 3.9/3.10 (e.g. macOS
 > system `python3`) `pip` silently installs an old 0.x that lacks the B01 device modules — which looks
@@ -107,6 +108,13 @@ backoff, the `--careful` halt-file, automatic `135` recovery status — are in
 ./vac.py daemon restart           # e.g. after `pip install -U python-roborock`
 ./vac.py status --force           # run ONE command standalone (own session; avoid repeating)
 ```
+
+**Headless (Linux/systemd):** a conservative [`roborock-vac.service`](roborock-vac.service) is included
+for running the daemon under `systemd --user`. It's **fail-stop** — it runs `--careful` and **never
+auto-restarts on a rate-limit/auth exit** (better to stop than risk the `135` ban); only an unexpected
+crash restarts, capped at 3×/hour. `daemon run` exits with distinct codes (75 rate-limit · 77 re-login
+needed · 69 unreachable) so a unit or monitor can react. Edit the path, drop it in
+`~/.config/systemd/user/`, enable.
 
 **Telemetry taps** (the daemon sees the whole stream, so capture lives there — opt-in, off by default):
 
@@ -146,6 +154,7 @@ Capture & decode (the reverse-engineering surface):
 ./vac.py watch --raw --out clean.jsonl   # EVERY decoded data-point, one JSON object per line
 ./vac.py map                             # floor plan -> map_rooms.png (grid renders anytime; +map_path.svg only during a clean)
 ./vac.py watch --bytes --out cap.jsonl && ./decode_map.py cap.jsonl   # low-level: byte capture -> offline decode
+./decode_map.py cap.jsonl --json         # structured data (rooms, robot position + current room, path, georef) -> stdout, pipe to jq
 ./vac.py history --from-capture clean.jsonl   # decode the per-clean back-catalog from a capture
 ./vac.py raw STATUS                       # send any raw B01 data-point (run `raw BADNAME` to list them)
 ```
@@ -164,6 +173,8 @@ fire-and-forget (no response body); `raw` is the escape hatch for features witho
 | [PROTOCOL.md](PROTOCOL.md) | The protocol-reference hub — start here to understand or extend the protocol |
 | [FRAME_ANATOMY.md](FRAME_ANATOMY.md) | Byte-by-byte walkthrough of the map-frame (protocol-301) decode |
 | `frames.ksy` | Machine-readable Kaitai schema for the map-frame headers (drop a capture into the Kaitai Web IDE) |
+| `datapoints.json` | Machine-readable index of all 114 B01 data-points + value enums (regenerate with `gen_datapoints.py`; meanings live in DP_DICTIONARY.md) |
+| `pyproject.toml` | PEP 621 packaging — `pip install .` (enforces Python ≥3.11) installs a `vac` command |
 | [CAPABILITIES.md](CAPABILITIES.md) | Every interaction, scoped: can / can't / unknown |
 | [DP_DICTIONARY.md](DP_DICTIONARY.md) | What each data-point means + decoded formats |
 | [DESIGN_NOTES.md](DESIGN_NOTES.md) | Why it works this way + the reverse-engineering findings |
@@ -194,7 +205,9 @@ fire-and-forget (no response body); `raw` is the escape hatch for features witho
 For the protocol itself, the reference hub is **[PROTOCOL.md](PROTOCOL.md)** — transport · auth/Hawk ·
 data points · map frames · capabilities, every claim tagged with a confidence tier + firmware/session
 provenance, dated "as of." The byte-by-byte map-frame walkthrough is **[FRAME_ANATOMY.md](FRAME_ANATOMY.md)**
-(with a machine-readable Kaitai header schema, [frames.ksy](frames.ksy), you can drop your own capture into).
+(with a machine-readable Kaitai header schema, [frames.ksy](frames.ksy), you can drop your own capture into,
+plus a machine-readable data-point index, [datapoints.json](datapoints.json), and structured map/position
+output via `decode_map.py --json` — so a status panel or web UI can consume the decode, not just a PNG).
 The highlights:
 
 - **The B01 map format** — the room grid is LZ4-compressed; path/position arrive as protocol-301

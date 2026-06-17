@@ -120,7 +120,10 @@ against in the seed corpus, when published):
 Every datapoint here is **"we used hardware H + method M → result R"**, then interpreted over the totality of
 available information. Method: an on-device HTTPS proxy (REST capture) + a single-connection MQTT tap (the live
 DP + 301 stream) run together, with a **timestamped operator log** so app-action → REST → MQTT → robot-state can
-be aligned. Sessions are labelled `s5`…`s26` (2026-06-12 … 2026-06-16); the per-finding anchors above cite them.
+be aligned. Sessions are labelled `s5`…`s26` (2026-06-12 … 2026-06-16); the per-finding anchors above cite them. The
+hands-on window was four days: protocol/map RE from captures (`s2`–`s19`, 06-12/13), then **live robot
+validation** (`s20`–`s26`, 06-14/15 — `s22`–`s26` each retain a capture; `s25` is a desk re-analysis). So a
+✅ on live behaviour traces to a specific supervised run, not a one-off guess.
 Captured evidence is retained internally; published excerpts are scrubbed per the **privacy floor** (settings/
 rooms/cron/timestamps clear; tokens/Hawk-creds/MAC/SSID/IP/email redacted; duid/serial/map-id placeholdered).
 
