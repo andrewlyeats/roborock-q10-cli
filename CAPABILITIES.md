@@ -1,14 +1,21 @@
 # Capability matrix — Roborock Q10 S5+ (B01)
 
+> **As of:** 2026-06-16 · firmware 03.11.24 · `python-roborock` 5.14.2. Best-effort/due-diligence as of this
+> date. Readable overview + confidence key: **[PROTOCOL.md](PROTOCOL.md)**.
+
 Every interaction the robot exposes (all 114 `B01_Q10_DP` data-points + library traits),
 scoped by what we can and can't do. Built 2026-06-12 from live testing + source/web research;
 **refreshed 2026-06-15** with s21–s24 (single-connection daemon, a complete live clean cycle,
 the settings matrix, STATUS↔mode mapping, and offline `history --from-capture`).
 
-**Legend**
+**Legend.** This table tracks a **capability axis** (can / can't / untested) — *distinct* from the
+4-tier **confidence** key in [PROTOCOL.md](PROTOCOL.md) (Confirmed / Plausible / Reported / Unknown).
+The glyphs are not the same scheme: here 🟡 means "needs RE/testing," **not** the confidence key's
+🟡 "Plausible." (`🔒` set-blocked and `☁` cloud-authoritative, used below and in DP_DICTIONARY, are
+orthogonal status markers on top of either axis.)
 - ✅ **Confirmed** — tested live, works.
 - 🟢 **Available** — exposed + mechanism proven (same path as a ✅), untested but should work.
-- 🟡 **Unknown** — needs reverse-engineering or testing (payload/format unclear).
+- 🟡 **Unknown/untested** — needs reverse-engineering or testing (payload/format unclear).
 - 🔴 **Not possible** — architectural limit, not exposed, or cloud-only.
 
 How to drive anything: `./vac.py <verb>` for built-ins, or `./vac.py raw <DP_NAME> '<json>'`
@@ -133,7 +140,7 @@ structured DP we *can* send (`{op:list}` works), so its other `op`s may be reach
 ## Connection / daemon (added s21–s24)
 The cloud broker rate-limits new MQTT CONNECTs (account-level `code 135`), which knocks out the CLI
 *and* the phone app. Fixed architecturally — a long-running **daemon holds ONE MQTT connection** and
-serves the CLI over a Unix socket. See DECISIONS s21–s24, DESIGN_NOTES.
+serves the CLI over a Unix socket. See [DESIGN_NOTES.md](DESIGN_NOTES.md).
 
 | Interaction | How | Status | Notes |
 |---|---|---|---|
@@ -153,7 +160,7 @@ consumables `*_LIFE` (read) · env `NET_INFO`, `TIME_ZONE`, `ROBOT_COUNTRY_CODE`
   dur_min / area / mode / pass / ok solid; field 7 = water; 6 = monotonic accumulator. The robot pushes
   the list via `op:notify` / broadcasts the `op:list` reply (e.g. when the app opens History) — a vac.py
   `op:list` PULL gets no reply (app/push-only). **`./vac.py history --from-capture <watch.jsonl>`** decodes
-  the back-catalog OFFLINE from any capture (recovers 19 records from `session2_echo.jsonl`).
+  the back-catalog OFFLINE from any capture (recovers 19 records from `your_capture.jsonl`).
 - ✅ **STATUS during cleaning is mode-specific** (s24): `102`=vacuuming, `103`=mopping, `104`=sweep_and_mop
   (= CLEAN_MODE 2 / 3 / 1); `6`/`101`/`104`/`105` are returning/relocating/transition; `22`=dock auto-empty;
   `8`=charging. See DP_DICTIONARY STATUS row.

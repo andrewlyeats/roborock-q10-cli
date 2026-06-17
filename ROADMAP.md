@@ -8,6 +8,16 @@ read device status, list cloud schedules, run room-targeted cleans, decode and r
 robot's map, and stream live telemetry. It talks to the vacuum through Roborock's cloud
 MQTT/REST APIs (there is no local control on B01 hardware).
 
+**Where this sits relative to upstream (read before treating any feature as unique).** Basic
+control/status/sensors are already in `python-roborock` + Home Assistant core, and map/georef/
+wall-zone decode is **converging in open python-roborock PRs** (#847 map, #848 georef, #850 walls,
+#851 MQTT room-clean). Several "Working today" items below therefore overlap with fast-moving
+upstream work — treat them as an independent, dated corroboration, not a sole source. The durable,
+least-duplicated contributions are the **dated, confidence-tagged protocol reference**
+([PROTOCOL.md](PROTOCOL.md)) and the **REST `/jobs` Hawk *body*-signing** finding (filed upstream as
+our own issue #849, unmerged). The intent is to upstream the differentiated pieces, not to compete
+on the CLI.
+
 ## Working today
 
 These capabilities are implemented and validated against a live device:
@@ -36,9 +46,11 @@ These capabilities are implemented and validated against a live device:
 
 ## Planned / not yet validated
 
-- **A *strictly* fault-free complete clean** — a complete cycle works, but every run so far trips a
-  transient cliff-sensor fault at a fixed **doorway threshold** (environmental; the robot self-recovers
-  in seconds). A run over a cleared/zoned sill is the remaining confirmation.
+- **A *strictly* fault-free complete clean** — a complete cycle works, but no run has been clean. Two
+  distinct failure modes have shown up: (1) a **transient cliff-sensor fault (501) at a fixed doorway
+  threshold** that the robot self-clears in seconds and finishes the clean (environmental), and (2) on at
+  least one run the robot **got trapped on the return and needed a manual reset** (it did *not* self-recover).
+  A run over a cleared/zoned sill, completing untouched, is the remaining confirmation.
 - **Live `history` fetch** — the back-catalog decodes offline from a capture today; a *live* pull is
   app/push-only (the robot broadcasts its history to the app, not to a direct request) — still WIP.
 - **Automatic `135` recovery** — the daemon's cool-down/reconnect path is offline-tested but not yet

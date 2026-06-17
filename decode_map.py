@@ -24,12 +24,13 @@ Two 301 sub-types, distinguished by their first 8 header bytes:
 Optional DP overlay (--dps <raw-watch-jsonl>):
   Pass a `watch --raw` JSONL (or your_capture.jsonl) to overlay walls, no-go
   zones, cleaning zones, and carpets on the map_overlay.png.
-  DP formats (all confirmed, DECISIONS sessions 9-10):
+  DP formats (decoded sessions 9-26; no-mop type corrected to 0x02 in s26):
     VIRTUAL_WALL_UP  = [count:u8] + count×(x1,y1,x2,y2) BE int16, mm.
                        NOTE: wall coords are (y,x) vs path's (x,y) — first value
                        is path_y, second is path_x (swap on coord_to_pixel call).
     RESTRICTED_ZONE_UP = [0x01][count:u8] + count×([type:u8][nverts:u8=4] + 4×(x,y) BE int16)
-                       type=0x00 for no-go, 0x01 for no-mop zone.
+                       type=0x00 for no-go, 0x02 for no-mop zone (0x02 ground-truthed s26;
+                       0x01 was an early wrong inference — see parse_restricted_zones).
     ZONED_UP         = identical format, type=0x01 for cleaning zone.
     CARPET_UP        = JSON {"data":[{id,rug_clean_mode,vertexs:[[x,y]×4]},...]}
 
@@ -48,7 +49,7 @@ import sys
 # varies by session / firmware / clean-mode (0x08 AND 0x11 both observed — s23 mop-mode
 # emitted 0201_0011_...); parse_path reads the point count from bytes 8-9 and is agnostic
 # to it. Matching the full 8-byte sig "0201000800020000" found ZERO path frames whenever
-# byte 3 differed (it silently dropped the entire s23 cleaning path). See DECISIONS s23.
+# byte 3 differed (it silently dropped the entire s23 cleaning path). See DESIGN_NOTES s23.
 PATH_SIG = "0201"
 # Grid frames: match only the 2-byte sub-type PREFIX. Bytes 2-5 of the full 8-byte
 # header are a device-specific map id (e.g. <device-map-id> on the dev's robot) and differ per
@@ -100,7 +101,7 @@ def parse_path(raw):
     pts[0] is structurally a real point whose VALUE is anomalous — we don't know why the newer
     firmware emits it (dock/origin reference? delta base?). Callers strip it via
     `_drop_path_outlier(pts)` (a band-aid, NOT a resolution). Do NOT "fix" by shifting the offset
-    (16→18 re-pairs every int16 and transposes the path — tried+reverted s23). OPEN: DECISIONS/TASKS.
+    (16→18 re-pairs every int16 and transposes the path — tried+reverted s23). OPEN: DESIGN_NOTES/ROADMAP.
     """
     count = struct.unpack(">H", raw[8:10])[0]
     body = raw[16:]
@@ -111,7 +112,7 @@ def parse_path(raw):
 
 def _drop_path_outlier(pts):
     """BAND-AID (not a resolution) for the unexplained spurious first point in 0201_0x11+ path
-    frames (a constant ~(0,-1900), outside the map — meaning UNKNOWN; see parse_path + DECISIONS
+    frames (a constant ~(0,-1900), outside the map — meaning UNKNOWN; see parse_path + DESIGN_NOTES
     s24 OPEN QUESTION). Drop pts[0] ONLY if its step to pts[1] is a gross outlier (>20x the median
     step), so a real pts[0] (e.g. the 0008 dock point) is never dropped. Surfaced as the green
     START dot landing outside the apartment walls (user-caught, s24).
@@ -201,7 +202,7 @@ def find_width(grid):
 
 def grid_dims_from_header(raw):
     """Grid (W, H) read straight from the 0101 frame header: raw[7:9]=W, raw[9:11]=H,
-    both BE u16. Verified 100% against find_width across 424 frames / 2 widths (DECISIONS
+    both BE u16. Verified 100% against find_width across 424 frames / 2 widths (DESIGN_NOTES
     s25). Returns None if the bytes are missing or implausible, so callers fall back to
     find_width. This is what makes the decode size-agnostic on any home (the dimensions
     are read off the wire, not guessed from a row-stride heuristic)."""
@@ -222,7 +223,7 @@ def resolve_dims(raw, out):
     Slicing by the HEADER dims (not by parse_rooms' boundary) is what keeps decode robust:
     some frames decompress to exactly W*H+2 bytes (a 2-byte room footer), which made the old
     find_width path mis-detect the stride (e.g. 418×41) on in-progress/edge frames. See
-    DECISIONS s26. `(0,0)` reset frames → grid_dims_from_header returns None → fallback."""
+    DESIGN_NOTES s26. `(0,0)` reset frames → grid_dims_from_header returns None → fallback."""
     hdr = grid_dims_from_header(raw)
     if hdr and hdr[0] * hdr[1] <= len(out):
         W, H = hdr
@@ -239,7 +240,7 @@ def fit_origin(grid, W, H, pts, res=GRID_MM_PER_PIXEL):
     inside the W×H grid, which bounds the search tightly. Returns (ox, oy, res, score) with
     score = on-floor fraction, or None if it can't fit.
 
-    The origin is NOT transmitted in the map frame (exhaustive header+body search, DECISIONS
+    The origin is NOT transmitted in the map frame (exhaustive header+body search, DESIGN_NOTES
     s25), but it's stable to ~1px per home — so we derive it per capture instead of shipping
     a hand-fit constant. This generalises the overlay to any home/dock without calibration.
     """
@@ -512,7 +513,7 @@ def render_overlay_png(grid, W, H, rooms, path_pts, dp_overlay=None, scale=3,
             return _mm_to_pixel(mm_y, mm_x, W, H, scale, ox, oy, res, coord_scale=2)
 
         # Virtual walls — dark red thick lines
-        # Wall format is (y,x) in path space (see DECISIONS session 9 + docstring)
+        # Wall format is (y,x) in path space (see DESIGN_NOTES session 9 + docstring)
         for (y1, x1), (y2, x2) in dp_overlay.get("walls", []):
             p1 = to_px(y1, x1)
             p2 = to_px(y2, x2)

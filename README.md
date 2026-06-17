@@ -8,6 +8,19 @@ Notes from reverse-engineering how the Roborock Q10 S5+ talks to Roborock's clou
 (`vac.py`) as proof it works. The Q10 S5+ is a **"B01" device: cloud-only**, with no local-network
 control path; every command is relayed through Roborock's MQTT broker (or its REST API).
 
+<table>
+<tr>
+<td align="center" width="420"><a href="FRAME_ANATOMY.md"><img src="assets/build_c.png" width="375" alt="a decoded Q10 map with the robot's path"></a></td>
+<td>
+<b><a href="FRAME_ANATOMY.md">Decoding the map stream — read the frame anatomy →</a></b><br><br>
+The Q10 streams its map as binary <b>protocol-301</b> frames. We decode the room grid and the robot's
+path, and have reverse-engineered <b>most</b> of the frame header byte-by-byte (including a newly-found
+map-finalized flag) — a few bytes, and where the map's origin lives, are still open questions.<br><br>
+<a href="FRAME_ANATOMY.md"><img src="assets/frame_layout.svg" width="440" alt="0101 grid and 0201 path byte layouts"></a>
+</td>
+</tr>
+</table>
+
 **Just want to use your vacuum?** The [Home Assistant Roborock integration][ha] probably already
 covers it with a GUI. This repo is for people who want to **understand or extend the B01 protocol**,
 or drive the vacuum from a terminal / cron / their own scripts.
@@ -17,20 +30,43 @@ disclaimer below.
 
 ### What this documents (the part worth reading)
 
+**Start here: [PROTOCOL.md](PROTOCOL.md)** — the protocol-reference hub (transport · auth/Hawk · data points ·
+map frames · capabilities), every claim tagged with a confidence tier + firmware/session provenance, dated
+"as of." The highlights:
+
 - **The B01 map format** — the room grid is LZ4-compressed; path/position arrive as protocol-301
   frames. Decoded end-to-end into a labeled floor plan — grid dimensions read from the frame header,
   and the path↔grid registration auto-fit per map (the origin isn't transmitted in the stream).
+  *(Not a sole source: python-roborock [PR #848] is converging on a similar auto-fit solve — read this
+  as an independent, dated corroboration, with the provenance write-up as the durable part.)*
   → [DESIGN_NOTES.md](DESIGN_NOTES.md), [`decode_map.py`](decode_map.py)
 - **The cloud write path** — room-clean and schedule writes go through a REST `/jobs` call that needs
   **Hawk *body* signing**; getting that wrong looks exactly like "writes don't work / token scope,"
-  but it isn't. → [DESIGN_NOTES.md](DESIGN_NOTES.md)
+  but it isn't. This one appears to be **genuinely undocumented elsewhere** (filed upstream as
+  [issue #849], unmerged). → [DESIGN_NOTES.md](DESIGN_NOTES.md)
 - **A single-connection daemon** — one held MQTT connection serving every command, to stay under the
-  account-level `135` rate-limit that otherwise locks out the CLI *and* the app. → [DESIGN_NOTES.md](DESIGN_NOTES.md)
-- **The B01 data-point dictionary** — what each data-point means and how its payload decodes (the
-  robot emits ~44; only ~19 are modeled in `status`). → [DP_DICTIONARY.md](DP_DICTIONARY.md)
+  account-level `135` rate-limit that otherwise locks out the CLI *and* the app. *(As upstream gains
+  held-connection / MQTT segment-clean paths, the practical edge narrows; the documented 135-avoidance
+  **design + the "why"** is the lasting bit.)* → [DESIGN_NOTES.md](DESIGN_NOTES.md)
+- **The B01 data-point dictionary** — what each data-point means and how its payload decodes (114 in
+  the library catalog; **~66** ever seen across all sessions; ~19 surfaced in `status`). → [DP_DICTIONARY.md](DP_DICTIONARY.md)
+
+**How this relates to upstream.** Basic Q10 control/status/sensors are already in `python-roborock` +
+Home Assistant core, and map/georef/wall-zone decode is **actively converging in open python-roborock
+PRs** ([#847] map, [#848] georef, [#850] walls, [#851] MQTT room-clean). So treat the decode/map parts
+here as an *independent, dated second implementation*, not a unique capability. The least-duplicated,
+most durable contributions are the **confidence-tagged protocol reference** itself and the **Hawk
+`/jobs` body-signing** finding — the aim is to feed those upstream, not to compete on the CLI.
 
 What's been verified vs. still open is scoped in [CAPABILITIES.md](CAPABILITIES.md) (can / can't /
 unknown) and [ROADMAP.md](ROADMAP.md).
+
+[PR #848]: https://github.com/Python-roborock/python-roborock/pull/848
+[issue #849]: https://github.com/Python-roborock/python-roborock/issues/849
+[#847]: https://github.com/Python-roborock/python-roborock/pull/847
+[#848]: https://github.com/Python-roborock/python-roborock/pull/848
+[#850]: https://github.com/Python-roborock/python-roborock/pull/850
+[#851]: https://github.com/Python-roborock/python-roborock/pull/851
 
 ## ⚠️ Disclaimer
 

@@ -102,8 +102,8 @@ logging.getLogger("roborock").setLevel(logging.ERROR)
 # module paths) that carry no API-stability guarantee. ALL such imports are
 # centralized HERE so a breaking library upgrade is a one-line fix in ONE place
 # rather than a hunt through the file. After any `pip install -U python-roborock`,
-# run ./check_roborock_api.py to confirm these still exist. See DECISIONS
-# 'dependency fragility' / TASKS #12 / CLAUDE.md.
+# run ./check_roborock_api.py to confirm these still exist. See DESIGN_NOTES
+# 'dependency fragility' / ROADMAP #12 / the project docs.
 try:
     from roborock import B01Fault
     from roborock.data import UserData
@@ -124,7 +124,7 @@ except ImportError as _exc:  # environment / upgrade guard
         f"python-roborock internal import failed: {_exc}\n"
         "Likely the wrong interpreter (run ./vac.py, or use the conda env / Python "
         ">=3.11), or a breaking library upgrade. Run ./check_roborock_api.py to see "
-        "exactly what moved (see CLAUDE.md / DECISIONS 'dependency fragility')."
+        "exactly what moved (see the project docs / DESIGN_NOTES 'dependency fragility')."
     )
 
 
@@ -143,7 +143,7 @@ def _hawk_auth(rriot, url: str, formdata: dict | None = None,
     """Build a Hawk ``Authorization`` header for the Roborock REST API.
 
     Vendored from python-roborock ``web_api._get_hawk_authentication`` (v5.14.2) so
-    vac.py does not depend on a private library function (TASKS #12). GET requests
+    vac.py does not depend on a private library function (ROADMAP #12). GET requests
     sign the path only. PUT/POST JSON bodies are signed via ``json_body``: the
     server validates ``md5(compact_json(body))`` in the formdata slot (confirmed
     by cross-checking app-captured MACs against all signing variants, session 17).
@@ -184,7 +184,7 @@ STATUS_TIMEOUT = 10
 # vac.py opens a fresh MQTT session per invocation. Firing many commands quickly
 # (e.g. polling `status` in a loop) can trip an ACCOUNT-LEVEL connection rate-limit:
 # the broker then refuses new sessions with `code 135 Not authorized`, which also
-# knocks out the phone app until it cools off (minutes–~1h). See DECISIONS s20 +
+# knocks out the phone app until it cools off (minutes–~1h). See DESIGN_NOTES s20 +
 # DESIGN_NOTES.md. We turn that cryptic crash into a clear message, and for read-only
 # commands retry a couple of times with backoff in case it's a brief throttle.
 _THROTTLE_MSG = (
@@ -260,7 +260,7 @@ _ERROR_HINTS = {
 # A long-running daemon holds ONE python-roborock DeviceManager open and serves the
 # CLI over a Unix socket, so every command rides a single cloud connection instead
 # of a new MQTT session per invocation (which trips the account-level connect
-# throttle — see _THROTTLE_MSG / DECISIONS s20). When the daemon is running it sets
+# throttle — see _THROTTLE_MSG / DESIGN_NOTES s20). When the daemon is running it sets
 # _INJECTED_SESSION; device_session then hands every existing cmd_* that one held
 # session transparently, so command logic is shared verbatim between the daemon and
 # the standalone `--force` path. Architecture credits in CREDITS.md.
@@ -268,7 +268,7 @@ DAEMON_PROTO = 1                       # bump when the socket protocol changes
 # Escalating cool-down (seconds) between reconnect attempts after a 135 throttle, so
 # we don't hammer the broker during an active ban (which only extends it). After this
 # many consecutive failures the daemon gives up and requires a manual login — retrying
-# revoked credentials forever is just noise to the server. (DECISIONS s21; server-view.)
+# revoked credentials forever is just noise to the server. (DESIGN_NOTES s21; server-view.)
 _RECONNECT_BACKOFF = [120, 300, 900, 900, 900]
 _MAX_RECONNECTS = len(_RECONNECT_BACKOFF)
 SOCK_PATH = pathlib.Path("~/.roborock_vacd.sock").expanduser()
@@ -394,7 +394,7 @@ async def fetch_status(props, timeout: int = STATUS_TIMEOUT):
 # the MQTT write is accepted by the broker but the server re-asserts the saved value on the
 # next sync, so the change does not stick from the CLI. There is no usable write channel for
 # these (the app persists them over the MQTT *input* topic we cannot publish to — confirmed
-# DECISIONS s18 / coord O22). We send anyway (harmless) but must not claim it persisted.
+# DESIGN_NOTES s18 / internal notes). We send anyway (harmless) but must not claim it persisted.
 CLOUD_REVERT_NOTE = (
     "  note: this is a cloud-stored preference — the server may revert it on the next sync. "
     "Change it in the Roborock app to make it stick. (See CAPABILITIES.md.)"
@@ -445,7 +445,7 @@ async def cmd_discover(duid: str | None, as_json: bool = False):
 
 
 # Empirically-decoded FAULT codes the library's B01Fault table lacks — decoded live from
-# the iOS app's human-readable pushes (see DP_DICTIONARY / DECISIONS s22). The FAULT DP is
+# the iOS app's human-readable pushes (see DP_DICTIONARY / DESIGN_NOTES s22). The FAULT DP is
 # OVERLOADED: it also carries benign lifecycle/status codes, so "non-zero" ≠ fault.
 _FAULT_OVERRIDES = {8: "robot trapped — clear obstacles"}   # firmware reports trapped as 8 (lib: 513/514)
 _FAULT_BENIGN = {400}   # 400 = "starting scheduled cleanup" — a START code, not a fault
@@ -538,7 +538,7 @@ async def cmd_consumables(duid: str | None, as_json: bool = False):
 
 # ── CLEAN_RECORD decode (shared: live history + --from-capture) ─────────────────
 # 12 underscore fields, field map cross-validated against an 18-record corpus
-# (DECISIONS s24): 2=dur_min, 5=area×1000, 8=mode, 10=pass, 11=ok are solid; 7=water
+# (DESIGN_NOTES s24): 2=dur_min, 5=area×1000, 8=mode, 10=pass, 11=ok are solid; 7=water
 # (vacuum→0; 4=possible "custom" level); 3≈0.55×dur; 6=monotonic accumulator (not a
 # clean attribute, so not surfaced).
 _CR_WATER = {0: "off", 1: "low", 2: "medium", 3: "high", 4: "custom"}
@@ -632,11 +632,11 @@ def cmd_history_from_capture(path: str, as_json: bool = False):
 
 
 async def cmd_history(duid: str | None, as_json: bool = False, timeout: int = 15):
-    # The op:list REQUEST is app/push-only — a vac.py op:list send gets no reply (DECISIONS
+    # The op:list REQUEST is app/push-only — a vac.py op:list send gets no reply (DESIGN_NOTES
     # s22–s24). The 12-field parser IS validated (18-record corpus). For the back-catalog
     # offline, use `--from-capture` on a watch/echo capture taken while the app shows History.
     print("NOTE: live `history` (op:list pull) is not working yet — the robot pushes the list to the"
-          " app, not to a vac.py request. Use `./vac.py history --from-capture <watch.jsonl>`. (TASKS #13)")
+          " app, not to a vac.py request. Use `./vac.py history --from-capture <watch.jsonl>`. (ROADMAP #13)")
 
     records: list[dict] = []
     seen: set[str] = set()
@@ -985,7 +985,7 @@ async def cmd_map(duid: str | None, timeout: int = 30, out_prefix: str = "map"):
     rooms_out = f"{out_prefix}_rooms.png"
     if best["path"]:
         pts, _ = dm.parse_path(best["path"])
-        pts = dm._drop_path_outlier(pts)   # strip the spurious leading sentinel (green-dot bug) — parity with decode_map.py; band-aid, OPEN QUESTION per DECISIONS s24
+        pts = dm._drop_path_outlier(pts)   # strip the spurious leading sentinel (green-dot bug) — parity with decode_map.py; band-aid, OPEN QUESTION per DESIGN_NOTES s24
         if pts:
             with open(path_out, "w") as f:
                 f.write(dm.render_path_svg(pts))
@@ -1065,7 +1065,7 @@ async def cmd_rooms(duid: str | None):
 
 
 async def cmd_clean_rooms(room_args: list[str], duid: str | None):
-    """Start a room-selective clean via a one-time REST /jobs POST (TASKS #8).
+    """Start a room-selective clean via a one-time REST /jobs POST (ROADMAP #8).
 
     Posts a one-time schedule ~2 min from now so the robot starts in ~2 min.
     Use --dry-run to validate the POST end-to-end without moving the robot
@@ -1165,7 +1165,7 @@ async def cmd_clean_rooms(room_args: list[str], duid: str | None):
 
     # One-time cron a couple minutes out. A --dry-run posts the job DISABLED so it can
     # NEVER fire regardless of delete success/timing (the scheduler skips enabled:false
-    # jobs) — this kills the delete-vs-fire race at the source (DECISIONS s18/s19), so a
+    # jobs) — this kills the delete-vs-fire race at the source (DESIGN_NOTES s18/s19), so a
     # real clean can use a short, prompt lead instead of a wide 5-min safety window.
     lead = 2
     fire = datetime.now() + timedelta(minutes=lead)
@@ -1472,7 +1472,7 @@ def _resolve_enum(enum_cls, value: str, label: str):
 # app's stored "Max+" job (4818761) carries fanLevel=5. So `max_plus` must map to 5
 # for REST — resolving it through `.code` would post 8, out of range → wrong/rejected
 # suction on the headline feature. Fan codes 1–4 already match, so only max_plus needs
-# remapping. (QA B01 / coord O21#1, O24: read-only contiguity evidence, ~90–95% conf;
+# remapping. (QA B01 / internal notes, O24: read-only contiguity evidence, ~90–95% conf;
 # a live "set app to Max+" /jobs capture would make it certain but is not required.)
 _REST_FAN_OVERRIDE = {"max_plus": 5}
 
@@ -1838,7 +1838,7 @@ class Daemon:
     async def _supervisor(self):
         """After a 135 throttle, cool down (ESCALATING) then try one reconnect with existing
         creds. Give up after _MAX_RECONNECTS — retrying revoked creds forever is just noise to
-        the server; require a manual `login`. Resets on success. (server-view, DECISIONS s21)"""
+        the server; require a manual `login`. Resets on success. (server-view, DESIGN_NOTES s21)"""
         while not self._stop.is_set():
             await asyncio.sleep(15)
             if not self.unauthorized or self.needs_login:

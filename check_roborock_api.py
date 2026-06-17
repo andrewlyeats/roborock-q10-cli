@@ -49,7 +49,7 @@ REQUIRED_DPS = [
 # Instance/trait API surface every action command goes through (props.vacuum.* / command.send /
 # status.add_update_listener / props.refresh). Introspected on the CLASSES — no live device needed.
 # This is the gap the import checks miss: a rename here PASSES the imports, then crashes the first
-# dock/watch (s26 audit, TASKS #15).
+# dock/watch (s26 audit, ROADMAP #15).
 TRAIT_METHODS = {
     ("roborock.devices.traits.b01.q10.vacuum", "VacuumTrait"):
         ["start_clean", "stop_clean", "pause_clean", "resume_clean",
@@ -170,7 +170,7 @@ def main():
         for f in failures:
             print(f"  FAIL  {f}")
         print(f"\n{len(failures)} broken dependency(ies). vac.py will likely fail until the "
-              "adapter points are updated. See DECISIONS 'dependency fragility' + CLAUDE.md.")
+              "adapter points are updated. See DESIGN_NOTES 'dependency fragility' + the project docs.")
         sys.exit(1)
     print("  PASS  all internal symbols vac.py depends on are present and shaped as expected.")
     if warnings:
