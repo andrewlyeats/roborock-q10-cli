@@ -12,10 +12,12 @@ Setup (first time only):
 
 Control:
   ./vac.py status                          # battery, state, fan, water, mode
+  ./vac.py status --quick                  # fast status via REST device-shadow (no MQTT session/daemon)
   ./vac.py start | stop | pause | resume
   ./vac.py dock                            # return to dock
   ./vac.py dock-empty                      # trigger dock auto-empty
   ./vac.py find                            # play locate beep
+  ./vac.py drive <forward|left|right|stop|exit>   # manual remote drive — built, but app-only/inert on this fw (see CAPABILITIES)
   ./vac.py fan <quiet|balanced|turbo|max|max_plus>
   ./vac.py water <off|low|medium|high>
   ./vac.py mode <vac_and_mop|vacuum|mop>
@@ -515,6 +517,66 @@ async def cmd_status(duid: str | None, as_json: bool = False):
                 print(f"   Fault     : {fault_label} ({s.fault})")
 
 
+# The REST device-shadow endpoint (`GET /devices/{duid}/shadow`) returns a small snapshot
+# in the LEGACY v1 dp space (RoborockDataProtocol: 121=state, 122=battery, 123=fan, …),
+# NOT the B01 dp space the MQTT stream uses. State is the v1 RoborockStateCode space — it
+# agrees on 8=charging, but the B01 active-clean codes (101–105) do NOT appear here, so a
+# cleaning robot may read as the v1 `5=cleaning`/`17=zoned`/`18=segment` instead. Pure REST
+# (one Hawk GET), no MQTT status session → fast, and can't trip the 135 connection cap.
+def _shadow_summary(result: dict) -> dict:
+    """Decode a raw device-shadow `result` (legacy v1 dp id->value, keys stringified) into a
+    structured summary. Pure (no I/O) → unit-testable. State decodes via RoborockStateCode; ids
+    beyond the v1 enum (120–135) surface in `extras` (B01-specific shadow codes). See test_status_quick."""
+    from roborock.roborock_message import RoborockDataProtocol as _DP
+    from roborock.data.v1.v1_code_mappings import RoborockStateCode as _State
+    dps = {int(k): v for k, v in result.items() if str(k).lstrip("-").isdigit()}  # keys are stringified ints
+    names = {p.value: p.name for p in _DP}
+    state_v = dps.get(_DP.STATE.value)
+    try:
+        state_name = _State(state_v).name if state_v is not None else None
+    except Exception:
+        state_name = None
+    return {
+        "state": state_name, "state_code": state_v,
+        "battery": dps.get(_DP.BATTERY.value),
+        "fan_power": dps.get(_DP.FAN_POWER.value),
+        "main_brush": dps.get(_DP.MAIN_BRUSH_WORK_TIME.value),
+        "side_brush": dps.get(_DP.SIDE_BRUSH_WORK_TIME.value),
+        "filter": dps.get(_DP.FILTER_WORK_TIME.value),
+        "dps": {names.get(k, f"dp{k}"): v for k, v in sorted(dps.items())},
+        "extras": {k: v for k, v in sorted(dps.items()) if k not in names},  # B01 ids beyond the v1 enum
+    }
+
+
+async def cmd_status_quick(duid: str | None, as_json: bool = False):
+    """Fast status via the REST device-shadow endpoint — one Hawk GET, no MQTT status session.
+    Surfaces state / battery / fan / consumable work-times from the legacy v1 dp snapshot.
+    `duid` resolves from the local device cache (prefer_cache → no live connection on a warm cache,
+    the normal case; a cold cache builds a manager once). Pass `--device <duid>` to skip resolution
+    and stay fully REST regardless. See CAPABILITIES.md (shadow)."""
+    creds = require_creds()
+    _duid = duid
+    if _duid is None:
+        async with device_session(None) as (dev, _props):
+            _duid = dev.duid
+    result = await _schedule_request("GET", f"/devices/{_duid}/shadow", creds) or {}
+    s = _shadow_summary(result)
+    if as_json:
+        print(json.dumps({"source": "rest-shadow", "state": s["state"], "state_code": s["state_code"],
+                          "battery": s["battery"], "fan_power": s["fan_power"], "dps": s["dps"]}, default=str))
+        return
+    print("⚡ Quick status (REST device-shadow — legacy v1 dps, no MQTT)")
+    print(f"   State    : {s['state'] or '?'}" + (f" ({s['state_code']})" if s["state_code"] is not None else ""))
+    print(f"   Battery  : {s['battery']}%" if s["battery"] is not None else "   Battery  : —")
+    if s["fan_power"] is not None:
+        print(f"   Fan power: {s['fan_power']}")
+    for label, key in (("Main brush", "main_brush"), ("Side brush", "side_brush"), ("Filter", "filter")):
+        if s[key] is not None:
+            print(f"   {label:9}: {s[key]}")
+    if s["extras"]:
+        print("   extras   : " + " ".join(f"{k}={v}" for k, v in s["extras"].items()))
+
+
 async def cmd_consumables(duid: str | None, as_json: bool = False):
     # *_LIFE = HOURS OF USE (confirmed 2026-06-12 against the app: DP value matched the
     # app's "N h"). The app derives % remaining from standard lifetimes; sensor/mop/dust
@@ -547,10 +609,10 @@ async def cmd_consumables(duid: str | None, as_json: bool = False):
 
 
 # ── CLEAN_RECORD decode (shared: live history + --from-capture) ─────────────────
-# 12 underscore fields, field map cross-validated against an 18-record corpus
-# (DESIGN_NOTES s24): 2=dur_min, 5=area×1000, 8=mode, 10=pass, 11=ok are solid; 7=water
-# (vacuum→0; 4=possible "custom" level); 3≈0.55×dur; 6=monotonic accumulator (not a
-# clean attribute, so not surfaced).
+# 12 underscore fields, field map cross-validated against an 18-record corpus (s24;
+# field-6/t1 monotonicity later confirmed across 22 records, s26): 2=dur_min, 5=area×1000,
+# 8=mode, 9=route, 10=pass, 11=ok are solid; 7=water (vacuum→0; 4=possible "custom" level);
+# 3≈0.55×dur; 6=monotonic accumulator (NOT a clean attribute → not surfaced).
 _CR_WATER = {0: "off", 1: "low", 2: "medium", 3: "high", 4: "custom"}
 _CR_MODE  = {1: "vac_and_mop", 2: "vacuum", 3: "mop", 4: "customized"}
 _CR_ROUTE = {0: "fast", 1: "daily", 2: "fine"}
@@ -1466,6 +1528,28 @@ async def cmd_find(duid):
     await run_action(lambda p: p.command.send(B01_Q10_DP.SEEK, {}), "Locate signal sent.", duid)
 
 
+# Manual remote drive → the library's RemoteTrait (props.remote). Maps the CLI verb to the
+# zero-arg trait method; `exit` → `exit_remote`. The trait sends COMMON{REMOTE: action} over MQTT.
+_DRIVE_ACTIONS = {"forward": "forward", "left": "left", "right": "right",
+                  "stop": "stop", "exit": "exit_remote"}
+
+
+async def cmd_drive(action: str, duid):
+    """Manual remote-control drive (B01 `RemoteTrait`). INCREMENTAL — each call is one discrete
+    step (the library methods take no distance/duration arg). `forward`/`left`/`right` move;
+    `stop` halts the last move (and is how you enter remote-control mode); `exit` leaves remote
+    control. ⚠️ MOVES THE ROBOT — use in a clear space. Nothing in telemetry confirms it (B01 has
+    no heading DP, and the 301 path streams only during a clean), so watch the robot. Tested live
+    (s27): the robot IGNORES CLI REMOTE writes (no motion, never STATUS=7) while the app drives fine
+    — it's app-only on this firmware, riding the blocked input topic. Kept as an honestly-labelled RE
+    artifact. See CAPABILITIES.md (Manual drive)."""
+    method = _DRIVE_ACTIONS.get(action.lower()) if action else None
+    if method is None:
+        sys.exit("Usage: ./vac.py drive <forward|left|right|stop|exit>  (moves the robot — use a clear space)")
+    msg = f"drive: {action.lower()} sent — NB: CLI drive is app-only/inert on this fw (see CAPABILITIES.md)."
+    await run_action(lambda p: getattr(p.remote, method)(), msg, duid)
+
+
 def _resolve_enum(enum_cls, value: str, label: str):
     """Map a user string to an enum member, exiting with the valid options."""
     member = next((m for m in enum_cls if m.name.lower() == value.lower()), None)
@@ -1562,16 +1646,20 @@ async def cmd_boost(state: str, duid):
     )
 
 
-async def cmd_raw(dp_name: str, value_json: str | None, duid: str | None):
+async def cmd_raw(dp_name: str, value_json: str | None, duid: str | None, common: bool = False):
     try:
         dp = B01_Q10_DP[dp_name.upper()]
     except KeyError:
         available = "\n  ".join(d.name for d in B01_Q10_DP)
         sys.exit(f"Unknown DP '{dp_name}'. Available:\n  {available}")
     value = json.loads(value_json) if value_json else {}
+    # --common: wrap as COMMON{<DP>: value} — the path the library uses for REMOTE (the robot's
+    # command/input channel) — vs a bare command.send(<DP>, value). RE probe for whether wrapping
+    # lands a write that the bare send doesn't (settings / START_BACK / walls). See CAPABILITIES write-path.
+    target, payload = (B01_Q10_DP.COMMON, {dp: value}) if common else (dp, value)
     async with device_session(duid) as (_device, props):
         try:
-            result = await asyncio.wait_for(props.command.send(dp, value), timeout=ACTION_TIMEOUT)
+            result = await asyncio.wait_for(props.command.send(target, payload), timeout=ACTION_TIMEOUT)
             print(json.dumps(result, indent=2, default=str) if result is not None else "Sent (no response).")
         except asyncio.TimeoutError:
             print("Command timed out (fire-and-forget commands return no response).")
@@ -1599,7 +1687,7 @@ _SIMPLE_CMDS = ("start", "stop", "pause", "resume", "dock", "dock-empty", "find"
 
 
 async def _run_one(cmd, rest, duid, as_json):
-    if cmd == "status":            await cmd_status(duid, as_json)
+    if cmd == "status":            await (cmd_status_quick if "--quick" in rest else cmd_status)(duid, as_json)
     elif cmd == "discover":        await cmd_discover(duid, as_json)
     elif cmd == "consumables":     await cmd_consumables(duid, as_json)
     elif cmd == "history":         await cmd_history(duid, as_json)
@@ -1612,6 +1700,9 @@ async def _run_one(cmd, rest, duid, as_json):
         await {"start": cmd_start, "stop": cmd_stop, "pause": cmd_pause,
                "resume": cmd_resume, "dock": cmd_dock, "dock-empty": cmd_dock_empty,
                "find": cmd_find}[cmd](duid)
+    elif cmd == "drive":
+        if not rest: sys.exit("Usage: ./vac.py drive <forward|left|right|stop|exit>")
+        await cmd_drive(rest[0], duid)
     elif cmd == "fan":
         if not rest: sys.exit("Usage: ./vac.py fan <quiet|balanced|turbo|max|max_plus>")
         await cmd_fan(rest[0], duid)
@@ -1639,8 +1730,10 @@ async def _run_one(cmd, rest, duid, as_json):
         if not rest: sys.exit("Usage: ./vac.py clean-rooms <name|id>... [--dry-run] ...")
         await cmd_clean_rooms(rest, duid)
     elif cmd == "raw":
-        if not rest: sys.exit("Usage: ./vac.py raw <DP_NAME> [json_value]")
-        await cmd_raw(rest[0], rest[1] if len(rest) > 1 else None, duid)
+        if not rest: sys.exit("Usage: ./vac.py raw [--common] <DP_NAME> [json_value]")
+        common = "--common" in rest
+        r = [a for a in rest if a != "--common"]
+        await cmd_raw(r[0], r[1] if len(r) > 1 else None, duid, common=common)
     elif cmd == "schedule":
         await cmd_schedule(rest[0] if rest else "list", rest[1:], duid, as_json)
     else:
@@ -2346,7 +2439,9 @@ def _local_main(cmd, rest, duid, as_json):
         "start": cmd_start, "stop": cmd_stop, "pause": cmd_pause, "resume": cmd_resume,
         "dock": cmd_dock, "dock-empty": cmd_dock_empty, "find": cmd_find,
     }
-    if cmd in json_cmds:
+    if cmd == "status" and "--quick" in rest:
+        run_ro(lambda: cmd_status_quick(duid, as_json))
+    elif cmd in json_cmds:
         # all read-only (discover/status/consumables/history) → safe to backoff-retry
         run_ro(lambda: json_cmds[cmd](duid, as_json))
     elif cmd in simple_cmds:
@@ -2356,6 +2451,10 @@ def _local_main(cmd, rest, duid, as_json):
         if not email:
             sys.exit("Usage: ./vac.py login --email your@email.com")
         run(cmd_login(email))
+    elif cmd == "drive":
+        if not rest:
+            sys.exit("Usage: ./vac.py drive <forward|left|right|stop|exit>")
+        run(cmd_drive(rest[0], duid))
     elif cmd == "fan":
         if not rest:
             sys.exit("Usage: ./vac.py fan <quiet|balanced|turbo|max|max_plus>")
@@ -2414,8 +2513,10 @@ def _local_main(cmd, rest, duid, as_json):
         run(cmd_clean_rooms(rest, duid))
     elif cmd == "raw":
         if not rest:
-            sys.exit("Usage: ./vac.py raw <DP_NAME> [json_value]")
-        run(cmd_raw(rest[0], rest[1] if len(rest) > 1 else None, duid))
+            sys.exit("Usage: ./vac.py raw [--common] <DP_NAME> [json_value]")
+        common = "--common" in rest
+        r = [a for a in rest if a != "--common"]
+        run(cmd_raw(r[0], r[1] if len(r) > 1 else None, duid, common=common))
     elif cmd == "schedule":
         sub = rest[0] if rest else "list"
         run(cmd_schedule(sub, rest[1:], duid, as_json))
@@ -2447,6 +2548,10 @@ def main():
         sys.exit("watch --bytes is a raw-frame capture — run it standalone with --force "
                  "(./vac.py watch --bytes --force), or capture via the daemon: "
                  "./vac.py daemon record --bytes cap.jsonl")
+
+    # `status --quick` is a pure REST shadow read (no MQTT session) — run standalone, no daemon needed.
+    if cmd == "status" and "--quick" in rest:
+        return _local_main(cmd, rest, duid, as_json)
 
     # `--force` (or `--no-daemon`): run standalone, opening this command's own session.
     if force:

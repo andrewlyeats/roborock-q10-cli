@@ -64,7 +64,9 @@ PATH_SIG = "0201"
 # device/home — matching the full signature would find zero frames on anyone else's robot.
 GRID_PREFIX = "0101"
 
-# Grid ↔ path registration (empirically derived; stable while dock position / map unchanged).
+# Grid ↔ path registration. These constants are the FALLBACK/default only — the live path now
+# auto-fits the origin per capture (s25: fit_origin, used by build_map_json + main), dropping to
+# these just when the fit is weak. Empirically derived; stable while dock position / map unchanged.
 # col = (path_y - GRID_ORIGIN_OY) // GRID_MM_PER_PIXEL   ← grid column  (x-axis)
 # row = (GRID_ORIGIN_OX - path_x) // GRID_MM_PER_PIXEL   ← grid row     (y-axis, inverted)
 # Score: 99.87 % of path points land on floor pixels at these values (6117/6125).
@@ -101,15 +103,26 @@ def load_frames(path, sig):
 # ── path (0201) ────────────────────────────────────────────────────────────────
 
 def parse_path(raw):
-    """Return (points, declared_count). Big-endian int16 (x,y) after 16-byte header.
+    """Return (points, declared_count). BE int16 (x,y) pairs; the header is 14 bytes + `count`
+    pairs (count-consistent: (len-14)/4 == count on every capture we have).
 
-    WORKED AROUND, NOT understood (s24): the 0201_0x11+ frames carry a SPURIOUS first point —
-    a constant ~(0,-1900) (x≈map-origin, y≈dock-y), outside the map; the 0008 era had a normal
-    point here. The header is 16 bytes for BOTH eras (byte 3 is just a per-clean counter), so
-    pts[0] is structurally a real point whose VALUE is anomalous — we don't know why the newer
-    firmware emits it (dock/origin reference? delta base?). Callers strip it via
-    `_drop_path_outlier(pts)` (a band-aid, NOT a resolution). Do NOT "fix" by shifting the offset
-    (16→18 re-pairs every int16 and transposes the path — tried+reverted s23). OPEN: DESIGN_NOTES/ROADMAP.
+    WORKAROUND, not a full resolution (s28 — corrected after an earlier overclaim). What's
+    verified: SOME cleans prepend a BOGUS leading point ~(0,-1900) (counted in `count`); others
+    don't. It is NOT a firmware "era" (firmware is constant 03.11.24) and NOT an extra header word
+    — byte[3] is a per-clean COUNTER, not a version (it increments within a single capture). Present
+    in the s23/s24/s26 cleans, absent in map_probe/s27.
+
+    What we do here is deliberate but unprincipled: read at offset 16 (a one-int16 SHEAR of the true
+    offset-14 coords) and let `_drop_path_outlier` strip the bogus point when present. The shear ≈ a
+    transpose that the render-time x<->y swap (render_path_svg) + the grid `col=y,row=x` convention
+    happen to undo — so maps render at 99.8-100% on all 6 captures. Robust, but a lucky cancellation.
+    (Tested s28: parsing the "true" offset-14/18 coords needs a per-clean axis convention and fits
+    *worse* on s24 — 99.65% vs this workaround's 99.88% — so this stays the more uniform choice.)
+
+    OPEN QUESTION for future RE (do NOT call this resolved): what TRIGGERS the bogus leading point?
+    Leads — longer/multi-segment cleans (→ higher byte[3]), or map type (s23/s24/s26 were the
+    multi-map-build window). Settle it with a targeted capture: short vs long/resumed clean, original
+    vs freshly-built map, and check whether the sentinel appears. See DESIGN_NOTES s28.
     """
     count = struct.unpack(">H", raw[8:10])[0]
     body = raw[16:]
@@ -119,11 +132,12 @@ def parse_path(raw):
 
 
 def _drop_path_outlier(pts):
-    """BAND-AID (not a resolution) for the unexplained spurious first point in 0201_0x11+ path
-    frames (a constant ~(0,-1900), outside the map — meaning UNKNOWN; see parse_path + DESIGN_NOTES
-    s24 OPEN QUESTION). Drop pts[0] ONLY if its step to pts[1] is a gross outlier (>20x the median
-    step), so a real pts[0] (e.g. the 0008 dock point) is never dropped. Surfaced as the green
-    START dot landing outside the apartment walls (user-caught, s24).
+    """Drop the bogus leading point that SOME cleans prepend to 0201 path frames (a sentinel
+    ~(0,-1900), counted in the frame's `count`; see parse_path). Drop pts[0] ONLY if its step to
+    pts[1] is a gross outlier (>20x the median step), so a genuine first point (e.g. a dock point)
+    is never dropped — robust and trigger-agnostic. NOT a firmware-version thing (byte[3] is a
+    per-clean counter). What TRIGGERS the sentinel is an OPEN QUESTION (see parse_path / DESIGN_NOTES
+    s28). Surfaced as the green START dot landing outside the walls (user-caught, s24).
     """
     if len(pts) < 4:
         return pts
@@ -624,6 +638,18 @@ def robot_room(last_pt, grid, W, H, ox=GRID_ORIGIN_OX, oy=GRID_ORIGIN_OY,
     return (col, row), rid
 
 
+def latest_path(paths):
+    """Most-RECENT path frame = the robot's CURRENT position. On a multi-clean capture, take
+    the latest in time, NOT the largest (`max(...,key=len)`): the biggest frame may be an
+    earlier/larger room, which would report the robot in the wrong place. Ties → file order."""
+    return max(enumerate(paths), key=lambda iv: (iv[1][0] or "", iv[0]))[1]
+
+
+def largest_path(paths):
+    """Most-COMPLETE single path frame = best for the georef fit (most points to land on floor)."""
+    return max(paths, key=lambda x: len(x[1]))
+
+
 def build_map_json(cap, dps_path=None):
     """Decode a `watch --bytes` capture into a structured, machine-consumable dict.
 
@@ -644,12 +670,15 @@ def build_map_json(cap, dps_path=None):
     result["source"]["path_frames"] = len(paths)
     result["source"]["grid_frames"] = len(grids)
 
-    pts = None
+    pts = None          # LATEST frame → robot position + current path
+    fit_pts = None      # LARGEST frame → georef fit (most points = best registration)
     if paths:
-        tm, raw = max(paths, key=lambda x: len(x[1]))
+        tm, raw = latest_path(paths)
         pts, declared = parse_path(raw)
         pts = _drop_path_outlier(pts)
+        fit_pts = _drop_path_outlier(parse_path(largest_path(paths)[1])[0])
         result["source"]["path_frame_time"] = tm
+        result["source"]["path_frame_selection"] = "latest for robot/path; largest for georef fit"
         result["path"] = {
             "point_count": len(pts),
             "declared_count": declared,
@@ -681,7 +710,7 @@ def build_map_json(cap, dps_path=None):
         ox, oy, res = GRID_ORIGIN_OX, GRID_ORIGIN_OY, GRID_MM_PER_PIXEL
         fit_method, fit_score = "default", None
         if pts:
-            fit = fit_origin(grid, W, H, pts)
+            fit = fit_origin(grid, W, H, fit_pts or pts)
             if fit and fit[3] >= 0.90:
                 ox, oy, res, fit_score = fit
                 fit_method = "auto"
@@ -776,11 +805,11 @@ def main():
     print(f"path frames: {len(paths)}   grid frames: {len(grids)}")
 
     if paths:
-        tm, raw = max(paths, key=lambda x: len(x[1]))
+        tm, raw = latest_path(paths)           # robot's CURRENT position = latest frame (NOT largest)
         pts, declared = parse_path(raw)
         pts = _drop_path_outlier(pts)          # s24: strip the spurious leading sentinel (green-dot bug)
         xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
-        print(f"\nPATH @ {tm}: {len(pts)} points (header {declared})")
+        print(f"\nPATH @ {tm} (latest): {len(pts)} points (header {declared})")
         print(f"  extent x {min(xs)}..{max(xs)}  y {min(ys)}..{max(ys)} "
               f"(~{(max(xs)-min(xs))/1000:.1f}m x {(max(ys)-min(ys))/1000:.1f}m)")
         print(f"  start (dock?): {pts[0]}   robot now: {pts[-1]}")
@@ -801,7 +830,7 @@ def main():
         print(f"  wrote map_rooms.png ({img.size[0]}x{img.size[1]})")
 
         if paths:
-            pts, _ = parse_path(max(paths, key=lambda x: len(x[1]))[1])
+            pts, _ = parse_path(largest_path(paths)[1])   # fit on the most-complete frame (best registration)
             pts = _drop_path_outlier(pts)      # s24: same sentinel strip as the SVG path
             fit = fit_origin(grid, W, H, pts)  # s25: derive registration per capture (origin isn't in the frame)
             if fit and fit[3] >= 0.90:

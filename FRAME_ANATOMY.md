@@ -4,6 +4,8 @@
 > live "build a new map" capture of session **s26** (map `<map-id>`; real room names redacted).
 > Unofficial, reverse-engineered. Confidence per row: ✅ confirmed · 🟡 inferred · ⬜ unknown.
 
+*This is a drill-down. The protocol-reference hub — with the confidence key and the method — is [PROTOCOL.md](PROTOCOL.md).*
+
 ## Where this binary sits
 
 The Q10 is **cloud-only**: every command and every map frame is relayed through Roborock's MQTT broker.
@@ -77,10 +79,8 @@ which is why the first two panels are unlabeled.
    Read whole 4-byte pairs and **ignore a trailing remainder of ≤ 2 bytes**. ⚠️ The header `point_count`
    can read **one higher** than the pairs actually present (this frame: count = 407, but 406 pairs +
    2 spare bytes). **Do not shift the start offset to "fix" the count** — byte 16 is correct (its points
-   land **≈100 %** on floor cells once georeferenced — see the georeference worked example below). Two
-   shifts were tried and reverted: reading from byte **14** matches the count but **transposes the
-   pairing** (on-floor rate falls to ~91 %), and a forward shift to byte **18** (s23) transposes it too —
-   both confirm byte 16. Last point = current robot position;
+   land **≈100 %** on floor cells once georeferenced — see the georeference worked example below).
+   Last point = current robot position;
    first ≈ dock. *Some firmware prepends one spurious `~(0, −1907)` point — drop `points[0]` only if its
    step to `points[1]` exceeds **20× the median step** of the path (a deterministic band-aid). The
    sentinel's meaning, and how to detect the firmware era from the frame, are both unresolved — we have
@@ -90,15 +90,14 @@ which is why the first two panels are unlabeled.
 
 9. A path point `(x, y)` mm → grid cell: **`col = (y − oy) // res`, `row = (ox − x) // res`**, with
    **`res = 20` mm/px** (note the 90° map: grid **col** comes from path **y**, grid **row** from path
-   **x**, and the row axis is **inverted**). The origin `(ox, oy)` is **not** in the frame (verified by
-   exhaustive header search). Recover it by **auto-fit**: choose the `(ox, oy)` that lands the most path
+   **x**, and the row axis is **inverted**). The origin `(ox, oy)` is **not** in the frame. Recover it by **auto-fit**: choose the `(ox, oy)` that lands the most path
    points on floor cells. For a multi-frame run, fit once on the largest frame and align the others by grid
    overlap — that is exactly what makes the three panels above share a single coordinate frame. *(Worked
    example: on the s26 capture the fit recovered **`ox = 1001`, `oy = −3307` mm** — these are
    `decode_map.py`'s `GRID_ORIGIN_OX` / `GRID_ORIGIN_OY`; mind the sign, `oy` is **negative** in this
    `col = (y − oy)` convention — and it landed **99.87 %** of path points on floor cells. Those constants
    are **per install** — dock-anchored, stable until the dock moves or the map is reset — not universal;
-   re-fit for your own home.)* ✅ `s25,s26`
+   re-fit for your own home.)* ✅
 
 ## `0101` grid-frame header — field reference
 

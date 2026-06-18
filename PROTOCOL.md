@@ -34,21 +34,21 @@ and the staleness signal: if your firmware is newer, treat it as advisory.
 The Q10 S5+ is a **"B01" device: cloud-only.** There is no local-network control path (confirmed — see
 [local control](DESIGN_NOTES.md#why-cloud-only)); every command is relayed through Roborock's cloud over **MQTT**, with a
 **REST** API for onboarding, schedules, and one-time room cleans. The live map/path arrives as a spontaneous
-binary **MQTT protocol-301** stream while cleaning. ✅ `fw 03.11.24, s5–s26`
+binary **MQTT protocol-301** stream while cleaning. ✅ `fw 03.11.24`
 
 ## Transport
 
 | Channel | Use | Confidence |
 |---|---|---|
-| **REST** (`api-us.roborock.com` / `usiot.roborock.com`) | onboarding, home/device data, `/jobs` (schedules + one-time room cleans) | ✅ `s16,s26` |
-| **MQTT** (cloud broker, TLS) | all live control + status; the device's output topic broadcasts to any subscribed client | ✅ `s21–s26` |
-| **MQTT protocol-301** (binary, spontaneous while cleaning) | map grid + cleaning path frames | ✅ `s5–s26` |
+| **REST** (`api-us.roborock.com` / `usiot.roborock.com`) | onboarding, home/device data, `/jobs` (schedules + one-time room cleans) | ✅ |
+| **MQTT** (cloud broker, TLS) | all live control + status; the device's output topic broadcasts to any subscribed client | ✅ |
+| **MQTT protocol-301** (binary, spontaneous while cleaning) | map grid + cleaning path frames | ✅ |
 
 <details><summary>The account-level <code>135</code> rate-limit (and why the daemon exists)</summary>
 
 Many MQTT connections in a short window trip an account-level error **`135`** ("Not Authorized" on reconnect[^135]) that
 locks out the CLI *and* the app. Holding **one** persistent connection sidesteps it — that's the single-connection
-daemon. ✅ `s20–s24`. No other surveyed project treats 135 as a deliberate-avoidance design (see [CREDITS.md](CREDITS.md) for the landscape).
+daemon. ✅. No other surveyed project treats 135 as a deliberate-avoidance design (see [CREDITS.md](CREDITS.md) for the landscape).
 </details>
 
 ## Authentication — Hawk, and the write-path body-signing
@@ -56,8 +56,7 @@ daemon. ✅ `s20–s24`. No other surveyed project treats 135 as a deliberate-av
 REST requests are **Hawk**-signed. The pre-string is seven colon-joined fields; the last is the **payload-hash
 slot**. GET signs it empty (works); **body-bearing writes (POST/PUT) to `/jobs` must put `md5(compact-JSON
 body)` there, and must SEND those exact compact bytes** — re-serialization with spaces breaks the MAC → `401`.
-This is why writes (schedules, room cleans) failed until we cracked it. ✅ `s16` — reproduced the app's captured
-`PUT` MAC exactly; filed upstream as [python-roborock#849](https://github.com/Python-roborock/python-roborock/issues/849).
+This is the body-signing rule for writes (schedules, room cleans). ✅ Filed upstream as [python-roborock#849](https://github.com/Python-roborock/python-roborock/issues/849).
 GET and `DELETE /jobs/{id}` (no body) are unaffected.
 
 ```
@@ -72,13 +71,13 @@ names + numeric codes are in `roborock/data/b01_q10/b01_q10_code_mappings.py` (`
 enums). **The full decoded DP reference — meanings, payload formats, confidence — is [DP_DICTIONARY.md](DP_DICTIONARY.md)**
 (~114 DPs; the most complete public B01-Q10 reference we're aware of). Highlights:
 - Settings split: `fan`/`water`/`mode` **persist**; `volume`/`child-lock`/`boost`/`DND` are **cloud-authoritative**
-  (CLI sends, cloud reverts). ✅ `s20,s24`
+  (CLI sends, cloud reverts). ✅
 - `FAULT` is **overloaded** — it also carries lifecycle codes (`8`=trapped, `400`=benign "starting clean"); a
-  non-zero FAULT is not necessarily an error. ✅ `s22`
+  non-zero FAULT is not necessarily an error. ✅
 - `CLEAN_RECORD` history is a 12-field underscore string (`op:list`); the live *pull* trigger is app-only
-  (MQTT, not our `op:list`). ✅ format `s20–s24`; ⬜ live-pull trigger.
+  (MQTT, not our `op:list`). ✅ format; ⬜ live-pull trigger.
 - Multi-map: `MULTI_MAP` ops `list`/`update`(rename)/`select`; `MULTI_MAP_SWITCH=4` = multi-level on; map id ≈
-  creation epoch. ✅ `s26`
+  creation epoch. ✅
 
 ## Map frames (protocol-301)
 
@@ -86,12 +85,12 @@ enums). **The full decoded DP reference — meanings, payload formats, confidenc
 [FRAME_ANATOMY.md](FRAME_ANATOMY.md).** Header layout (machine-checked): [frames.ksy](frames.ksy).
 Two sub-types, by the first 2 header bytes.
 - **`0101` — room/occupancy grid.** LZ4-compressed. Grid **W/H read from the header** (`raw[7:9]`,`raw[9:11]`
-  BE u16 — verified == empirical on 424/424 frames); `pixel//4=room_id`, `243`=outside, `249`=wall; trailing
-  room-name records. ✅ `s5,s25`. Header byte `[6]` is a **map-segmented/finalized flag** (`0` while
-  building, `1` once rooms exist — verified 89/89 on a from-scratch build, `s26`). 🟡
-- **`0201` — cleaning path.** BE int16 `(x,y)` mm pairs after a 16-byte header; last point = robot position. ✅ `s6`
+  BE u16); `pixel//4=room_id`, `243`=outside, `249`=wall; trailing
+  room-name records. ✅ Header byte `[6]` is a **map-segmented/finalized flag** (`0` while
+  building, `1` once rooms exist). 🟡
+- **`0201` — cleaning path.** BE int16 `(x,y)` mm pairs after a 16-byte header; last point = robot position. ✅
 - **Georeference** (path mm → grid pixel): the origin is **not transmitted**; we **auto-fit** it per capture
-  (it's stable per home, anchored top-right, grows left/down). ✅ `s25,s26`. Others use manual-tune
+  (it's stable per home, anchored top-right, grows left/down). ✅ Others use manual-tune
   calibration. ❓ python-roborock PR #848 draft attempts an auto-fit too.
 
 ## Capabilities
@@ -104,7 +103,7 @@ mutations (walls/zones) decode but can't be set from here; some settings are clo
 
 Where we're uncertain or others disagree — **the high-value targets for anyone extending this** (data to test
 against in the seed corpus, when published):
-- **No-mop zone type code:** we observe **`0x02`** (ground-truthed, drew one, `s26`); python-roborock PR #850
+- **No-mop zone type code:** we observe **`0x02`** (ground-truthed); python-roborock PR #850
   reports **`0x03`**. Unresolved — possibly per-firmware or sub-types. ⬜ ❓ *Context (Reported):* the RRMapFile
   **file** format (marcelrv/XiaomiRobotVacuumProtocol) numbers these as separate *blocks* — no-go=9, virtual
   walls=10, no-mop=12 — a different encoding from the B01 **MQTT DP** `RESTRICTED_ZONE_UP` types, which is one
@@ -120,10 +119,16 @@ against in the seed corpus, when published):
 Every datapoint here is **"we used hardware H + method M → result R"**, then interpreted over the totality of
 available information. Method: an on-device HTTPS proxy (REST capture) + a single-connection MQTT tap (the live
 DP + 301 stream) run together, with a **timestamped operator log** so app-action → REST → MQTT → robot-state can
-be aligned. Sessions are labelled `s5`…`s26` (2026-06-12 … 2026-06-16); the per-finding anchors above cite them. The
-hands-on window was four days: protocol/map RE from captures (`s2`–`s19`, 06-12/13), then **live robot
-validation** (`s20`–`s26`, 06-14/15 — `s22`–`s26` each retain a capture; `s25` is a desk re-analysis). So a
+be aligned. The hands-on window was four days (2026-06-12 … 2026-06-16): protocol/map RE from captures first, then **live robot
+validation**. So a
 ✅ on live behaviour traces to a specific supervised run, not a one-off guess.
+
+**Method ceiling.** These techniques — the MQTT output-tap, the HTTPS/REST proxy, app-vs-CLI A/B tests, and
+offline byte analysis — expose everything the robot *broadcasts* and everything the app sends over *REST*, but
+not the app's MQTT *input* (write) commands, so we're near their ceiling: the remaining unknowns (wall/zone/room
+SET, manual drive, the live-history trigger) all sit behind that one wall. Crossing it needs the technique we're
+weighing next — a transparent MQTT MITM on `:8883` (e.g. WireGuard/iptables TLS interception) to capture the
+app's actual write frames.
 Captured evidence is retained internally; published excerpts are scrubbed per the **privacy floor** (settings/
 rooms/cron/timestamps clear; tokens/Hawk-creds/MAC/SSID/IP/email redacted; duid/serial/map-id placeholdered).
 

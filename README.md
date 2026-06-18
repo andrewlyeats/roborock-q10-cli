@@ -11,6 +11,7 @@ control path; every command is relayed through Roborock's MQTT broker (or its RE
 ## Quickstart
 
 ```bash
+git clone https://github.com/andrewlyeats/roborock-q10-cli.git && cd roborock-q10-cli
 pip install -r requirements.txt            # needs Python ≥3.11 — see the install gotcha under Setup
 ./vac.py login --email you@example.com     # emails you a 6-digit code
 ./vac.py discover                          # caches your device list
@@ -41,16 +42,14 @@ map-finalized flag) — a few bytes, and where the map's origin lives, are still
 **Want a GUI?** The [Home Assistant Roborock integration][ha] probably already covers your vacuum — if
 that's all you need, use it. **Want a terminal / cron / scripting tool, or to understand and extend the
 B01 protocol?** That's what this is: the **Quickstart** above gets you to a rendered map in a few commands;
-the protocol-reference hub for extenders is **[PROTOCOL.md](PROTOCOL.md)** (see [the deep end](#understanding-the-protocol-the-deep-end) below).
-
-**Status:** a personal project, shared as-is. Unofficial, no warranty, no support promised — see the
-disclaimer below.
+the protocol-reference hub for extenders is **[PROTOCOL.md](PROTOCOL.md)** — with findings that look undocumented elsewhere, like the REST **Hawk body-signing** rule that gates every cloud write (see [the deep end](#understanding-the-protocol-the-deep-end) below).
 
 ## ⚠️ Disclaimer
 
 This is an **unofficial**, community reverse-engineered tool — **not affiliated with, endorsed by, or
 supported by Roborock**. It talks to your own account over Roborock's cloud and relies on undocumented
-internals the vendor can change at any time. Provided **as-is, no warranty, use at your own risk.**
+internals the vendor can change at any time. A personal project, provided **as-is, no warranty, no support,
+use at your own risk.**
 Commands are reversible and the project errs toward safety (e.g. `clean-rooms --dry-run` posts a
 *disabled* job), but you are responsible for your device and account — don't run it on hardware or an
 account you can't afford to disrupt.
@@ -75,7 +74,9 @@ Needs Python **≥3.11** and the deps in `requirements.txt` (python-roborock, lz
 
 > **The one install gotcha:** python-roborock 5.x requires Python ≥3.11. On 3.9/3.10 (e.g. macOS
 > system `python3`) `pip` silently installs an old 0.x that lacks the B01 device modules — which looks
-> like "the library is broken." Run `vac.py` on a ≥3.11 interpreter that has the deps.
+> like "the library is broken." Run `vac.py` on a ≥3.11 interpreter that has the deps. Note `./vac.py`
+> uses your PATH's `python3` (shebang `env python3`) — confirm `python3 --version` is ≥3.11, or use the
+> `vac` command from `pip install .`, which enforces it.
 
 First-time auth (one time):
 
@@ -131,6 +132,7 @@ Everyday commands:
 
 ```bash
 ./vac.py status        # battery, state, fan, water, mode, clean time/area  (+--json)
+./vac.py status --quick  # fast status via REST device-shadow — no MQTT/daemon (legacy v1 dps; +--json)
 ./vac.py start | pause | resume | stop | dock | dock-empty | find
 ./vac.py rooms                       # list rooms on the current map (id + name)
 ./vac.py clean-rooms kitchen study   # clean only those rooms (full cycle; +--fan/--water/--route/--count)
@@ -157,6 +159,8 @@ Capture & decode (the reverse-engineering surface):
 ./decode_map.py cap.jsonl --json         # structured data (rooms, robot position + current room, path, georef) -> stdout, pipe to jq
 ./vac.py history --from-capture clean.jsonl   # decode the per-clean back-catalog from a capture
 ./vac.py raw STATUS                       # send any raw B01 data-point (run `raw BADNAME` to list them)
+./vac.py raw --common <DP> '<json>'       # wrap as COMMON{DP:val} (robot input channel) vs a bare send — write-path probe
+./vac.py drive forward                    # manual remote drive (forward|left|right|stop|exit) — ⚠️ built but app-only/inert on this fw (see CAPABILITIES)
 ```
 
 Multiple robots? Add `--device <duid>` (DUIDs via `./vac.py discover`). Most B01 commands are
@@ -191,7 +195,7 @@ fire-and-forget (no response body); `raw` is the escape hatch for features witho
   is auto-fit per capture → `map_overlay.png`. Obstacles are cloud-only (not in this data) — the
   library exposes none of this natively.
 - **Room cleaning** (`clean-rooms`) issues a one-time REST `/jobs` clean for the named rooms;
-  `--dry-run` posts an inert *disabled* job. A complete cycle (undock → clean → dock → charging) is
+  `--dry-run` posts a *disabled* job, confirms it, then deletes it (disabled so it can't fire even if the delete races). A complete cycle (undock → clean → dock → charging) is
   validated live. The job fires **~2 min later** (scheduled, not instant). See [DESIGN_NOTES.md](DESIGN_NOTES.md).
 - **Structured map mutations are read-only** — virtual walls, no-go/no-mop zones, room
   split/merge/rename decode but can't be set from here.
@@ -229,7 +233,7 @@ The highlights:
 
 **How this relates to upstream.** Basic Q10 control/status/sensors are already in `python-roborock` +
 Home Assistant core, and map/georef/wall-zone decode is **actively converging in open python-roborock
-PRs** ([#847] map, [#848] georef, [#850] walls, [#851] MQTT room-clean). So treat the decode/map parts
+PRs** ([#847], [#848], [#850], [#851]). So treat the decode/map parts
 here as an *independent, dated second implementation*, not a unique capability. The least-duplicated,
 most durable contributions are the **confidence-tagged protocol reference** itself and the **Hawk
 `/jobs` body-signing** finding — the aim is to feed those upstream, not to compete on the CLI.

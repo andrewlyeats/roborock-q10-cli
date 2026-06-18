@@ -38,6 +38,8 @@ SYMBOLS = [
     ("roborock.data.b01_q10.b01_q10_code_mappings", "YXWaterLevel", "med"),
     ("roborock.data.b01_q10.b01_q10_code_mappings", "YXCleanType", "med"),
     ("roborock.data.b01_q10.b01_q10_code_mappings", "YXCleanLine", "med"),  # vac.py: clean-rooms/schedule --route
+    ("roborock.roborock_message", "RoborockDataProtocol", "med"),           # vac.py status --quick: REST-shadow dp ids
+    ("roborock.data.v1.v1_code_mappings", "RoborockStateCode", "med"),       # vac.py status --quick: v1 state decode
 ]
 
 # Specific enum members vac.py sends by name — a rename here breaks commands silently.
@@ -114,6 +116,24 @@ def main():
         for name in REQUIRED_DPS:
             if not hasattr(dp, name):
                 failures.append(f"[med] B01_Q10_DP.{name} is GONE (vac.py sends this DP)")
+
+    # 2b) status --quick reads these RoborockDataProtocol members (legacy v1 dp ids in the REST shadow).
+    #     Relies on the enum's case-insensitive attr access — a dropped alias would break --quick.
+    rdp = resolved.get(("roborock.roborock_message", "RoborockDataProtocol"))
+    if rdp is not None:
+        for name in ("STATE", "BATTERY", "FAN_POWER", "MAIN_BRUSH_WORK_TIME",
+                     "SIDE_BRUSH_WORK_TIME", "FILTER_WORK_TIME"):
+            if not hasattr(rdp, name):
+                failures.append(f"[med] RoborockDataProtocol.{name} is GONE (vac.py status --quick reads it)")
+
+    # 2c) status --quick decodes the shadow STATE via RoborockStateCode(code); 8=charging anchors the space.
+    rsc = resolved.get(("roborock.data.v1.v1_code_mappings", "RoborockStateCode"))
+    if rsc is not None:
+        try:
+            if rsc(8).name.lower() != "charging":
+                warnings.append("RoborockStateCode(8) is no longer 'charging' — status --quick state labels may drift")
+        except Exception as e:
+            failures.append(f"[med] RoborockStateCode(8) failed: {e} (vac.py status --quick decodes shadow state)")
 
     # 3) Private channel surface: vac.py uses props._channel.subscribe_stream().
     #    We can't construct a live channel here, but we can confirm the channel class

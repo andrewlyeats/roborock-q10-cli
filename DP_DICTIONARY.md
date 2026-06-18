@@ -28,34 +28,34 @@ anchor (e.g. `fw 03.11.24, s22`).
 
 | DP | code | observed | meaning |
 |---|---|---|---|
-| `STATUS` | dpStatus | 3,6,7,8,10,12,22,29,101,102,103,104,105 | device state enum (`YXDeviceState`); all 13 values observed ✅. `8`=charging, `3`=idle, `6`=returning, `12`=error, `22`=emptying-bin, `29`=mapping; the `102/103/104` active-clean states are mode-specific. **Full table, the state sequences, and the openHAB cross-ref → [STATUS detail](#status-detail) below.** |
-| `BATTERY` | dpBattery | 58–66 | battery %. ✅ drained ~0.4%/min while mopping. |
+| `STATUS` | dpStatus | 2,3,6,7,8,10,12,22,29,101,102,103,104,105 | device state enum (`YXDeviceState`); all 14 values observed ✅. `2`=sleeping (idle→low-power doze), `8`=charging, `3`=idle, `6`=returning, `12`=error, `22`=emptying-bin, `29`=mapping; the `102/103/104` active-clean states are mode-specific. **Full table, the state sequences, and the openHAB cross-ref → [STATUS detail](#status-detail) below.** |
+| `BATTERY` | dpBattery | 58–66 | battery %. ✅ |
 | `CLEAN_PROGRESS` | dpCleanProgress | 26–37 | **% of current job complete (0–100)**. ✅ monotonic. Now surfaced in `status`/`watch`. |
-| `CLEAN_AREA` | dpCleanArea | 38–50 | **swept** area this run, m² — distance-swept × lane-width, NOT floor footprint. ✅ Cross-checked: latest path polyline 256m × ~0.2m lane ≈ 51 m² ≈ CLEAN_AREA 50, inside an ~18 m² room (path bbox). Counts overlap + the 2 passes (CLEAN_COUNT=2). |
+| `CLEAN_AREA` | dpCleanArea | 38–50 | **swept** area this run, m² — distance-swept × lane-width, NOT floor footprint (e.g. a 256 m path × ~0.2 m lane ≈ 51 m², reported for a clean in an ~18 m² room). Counts overlap + the multiple passes. ✅ |
 | `CLEAN_TIME` | dpCleanTime | 3762–5070 | **task clock, seconds**, ticks ~1/sec. ✅ pauses when docked; flatline while mopping = stall signal. |
-| `FAULT` | dpFault | 0 | active fault code; 0 = none. **⚠️ OVERLOADED — also carries lifecycle/state codes, so a non-zero FAULT is NOT necessarily an error** ✅ `s22` (e.g. `400`=benign "starting clean", `8`=trapped, `501`=cliff-suspended). Decoded best-effort via the library's `B01Fault`, always with raw-code passthrough. **Full code table, the `B01Fault` caveat, and the openHAB cross-ref → [FAULT detail](#fault-detail) below.** |
-| `SUSPECTED_THRESHOLD_UP` | — | `[]` | **s23 (new).** Appeared at clean start; value an empty list when no threshold flagged. Threshold-detection related — surfaced in the same run as a `501 robot_suspended` (cliff/threshold) trip. Likely a list of suspected threshold locations/edges; needs samples with a non-empty value to decode. |
-| `CLIFF_RESTRICTED_AREA_UP` | — | `[]` | **s23 (new).** Appeared at clean start alongside `SUSPECTED_THRESHOLD_UP`; empty list when none. Cliff-sensor "restricted area" reporting (no-go edges the robot detected). Needs a non-empty sample. |
-| `ADD_CLEAN_AREA` | — | `"AQAA"` | **s23/s24.** Appears at the **fault-RECOVERY moment** (right around each transient 501). Base64 → bytes `01 00 00`, and it is **CONSTANT across s23+s24** (never any other value) → a **flag/marker** (robot re-adding clean area after an interruption), NOT a varying counter. |
-| `FLOOR_MATERIAL` | — | `[]` | Per-room floor material. **Format already cracked** (CAPABILITIES: `[01][n](room_id, material)`, `YXRoomMaterial` 2=tile/255=other, confirmed by toggling room 6; SET blocked). Seen `[]` in the s23/s24 captures (none set then). |
+| `FAULT` | dpFault | 0 | active fault code; 0 = none. **⚠️ OVERLOADED — also carries lifecycle/state codes, so a non-zero FAULT is NOT necessarily an error** ✅ (e.g. `400`=benign "starting clean", `8`=trapped, `501`=cliff-suspended, `556`=robot announced it couldn't locate itself; physical trigger OPEN — relocalize-fail vs a start/end bump — see FAULT detail). Decoded best-effort via the library's `B01Fault`, always with raw-code passthrough. **Full code table, the `B01Fault` caveat, and the openHAB cross-ref → [FAULT detail](#fault-detail) below.** |
+| `SUSPECTED_THRESHOLD_UP` | — | `[]` | Appears at clean start; value an empty list when no threshold flagged. Threshold-detection related. Likely a list of suspected threshold locations/edges; needs samples with a non-empty value to decode. |
+| `CLIFF_RESTRICTED_AREA_UP` | — | `[]` | Appears at clean start; empty list when none. Cliff-sensor "restricted area" reporting (no-go edges the robot detected). Needs a non-empty sample. |
+| `ADD_CLEAN_AREA` | — | `"AQAA"` | Appears at the **fault-RECOVERY moment** (right around each transient 501). Base64 → bytes `01 00 00` → a **flag/marker** (robot re-adding clean area after an interruption), NOT a varying counter. |
+| `FLOOR_MATERIAL` | — | `[]` | Per-room floor material. **Format already cracked** (CAPABILITIES: `[01][n](room_id, material)`, `YXRoomMaterial` 2=tile/255=other; SET blocked). |
 
 ### STATUS detail
 
-**Full table** (`YXDeviceState`; all 13 values observed across all sessions ✅): `3`=idle, `6`=returning_home,
+**Full table** (`YXDeviceState`; all 14 values observed ✅): `2`=sleeping (low-power doze
+after sitting idle off-dock — woke on the next scheduled clean), `3`=idle, `6`=returning_home,
 `7`=remote_control_active, `8`=charging, `10`=paused, `12`=error, `22`=emptying_the_bin, `101`=relocating,
 `102`=vacuuming, `103`=mopping, `104`=sweep_and_mop (also the ~2 s leaving-dock transition), `105`=transitioning,
 `29`=active mapping.
 
-- **Sequences.** Start+stop+return: `8→104→101→104→10→3→6→8`. s22 scheduled-clean→abort→dock:
-  `8→104`(undock)`→6`(cleaning)`→[dock]→22`(bin auto-empty)`→104/105/101`(returning)`→12→8`(charging) — re-confirms
-  `22`=emptying_the_bin (matched the app's "dock vacuum clean") and `8`=charging.
-- **s24 — STATUS↔CLEAN_MODE mapping nailed** (ran each mode deliberately): the active-clean status is
+- **Sequences.** A normal start+stop+return cycle: `8→104→101→104→10→3→6→8`.
+ 
+- **STATUS↔CLEAN_MODE mapping** — the active-clean status is
   **mode-specific** → CLEAN_MODE `1` (vac_and_mop)=`104`, `2` (vacuum)=`102`, `3` (mop)=`103`. The `6`/`101`/`105`
   values are the surrounding returning/relocating/transition states.
-- **s26 — `29` = active MAPPING** (quick-map): seen throughout a live "build a new map" run (robot off dock, growing
-  the `0101` grid) — a distinct mapping state, not a clean state.
+- **`29` = active MAPPING** — a distinct mapping state, not a clean state.
+ 
 - ⚠️ `6` also appeared during the ACTIVE-clean phase (between undock and dock), which sits oddly with the
-  `6=returning_home` label — `6` may be a generic working state. Flagged for review.
+  `6=returning_home` label — `6` may be a generic working state; remains an open question.
 - ❓ **Reported cross-ref** (openHAB `roborock` binding, `api/enums/StatusType.java`, 2026-06-16): their status enum
   (a *classic Roborock-protocol* table, **not** confirmed to be the B01 `YXDeviceState`) lists
   `3=IDLE, 6=RETURNING, 8=CHARGING, 10=PAUSED, 12=ERROR, 22=EMPTYING_BIN, 29=MAPPING` — **independently corroborating**
@@ -74,19 +74,28 @@ passthrough.**
 **⚠️ The FAULT DP is OVERLOADED** — it carries normal lifecycle/state codes as well as genuine faults, so a non-zero
 FAULT is **not** necessarily an error. Codes seen against a live device:
 
-- **`8` = robot trapped** ✅ s22 — app push *"Robot trapped. Clear away any obstacles…"* at the same timestamp,
-  co-occurring with STATUS=12. This firmware reports trapped as `8`, **not** the library's `513/514 robot_trapped`
+- **`8` = robot trapped** ✅ This firmware reports trapped as `8`, **not** the library's `513/514 robot_trapped`
   (a firmware remap).
-- **`400` = benign "Starting scheduled cleanup"** ✅ s22 — a lifecycle/START code, **not** a fault (≈`F_407
+- **`400` = benign "Starting scheduled cleanup"** ✅ a lifecycle/START code, **not** a fault (≈`F_407
   cleaning_in_progress`). Do not present it as an error.
-- **`501` = `F_501 robot_suspended`** — cliff-trip/threshold halt mid-clean; s23 reconfirmed it self-cleared in ~16 s
-  and the robot still finished the clean (a 501 does not necessarily abort).
+- **`501` = `F_501 robot_suspended`** — cliff-trip/threshold halt mid-clean; a 501 does not necessarily abort.
+ 
 - **`570`** — the table says `F_570 main_brush_entangled`, but that **contradicts** our observation (570 fired on an
   *unreachable* room @ 0 m²; `F_2007/F_2012 cannot_reach_target` fits far better) → **do not trust the 570 label**
   until validated.
+- **`556`** — fired when an app **spot-clean** started immediately after a **manual drive**; the robot
+  **announced it couldn't determine its location**. Absent from `B01Fault`; sits among the 5xx sensor/localization
+  neighbours (`500`=lidar_blocked, `509`=cliff_sensor_error). It self-cleared in ~1 s (`556→0`). **Physical trigger is an OPEN QUESTION** — two live
+  hypotheses, not yet separated: (a) a true **relocalization failure** (manual drive left the global pose
+  uncertain → the spot-clean relocalize couldn't recover it), or (b) the robot **bumped an object near the
+  triangle's start/end point** (the drive began and ended in the same spot, so an obstacle there
+  is plausible). **Post-session capture analysis leans (a):** `556` is a *localization* code (not a bumper/trapped
+  code `8`/`510`), and manual drive was confirmed to run in a **local odometry frame decoupled from the global
+  map** (both app-drives reset to ~`(0,0)` regardless of true global position) — so a failed *global* relocalize
+  right after driving is the mechanistic fit. The robot did move ~12 cm during the degraded part-clean, so a
+  contributing bump can't be excluded — but the *reported* cause is localization, not collision.
 
-Both `8` and `400` are absent from `B01Fault`; they were decoded by lining iOS pushes (phone-clock − "Nm ago") up
-against timestamped tap frames. Library neighbours for reference: `500`=lidar_blocked, `509`=cliff_sensor_error,
+Both `8` and `400` are absent from `B01Fault`. Library neighbours for reference: `500`=lidar_blocked, `509`=cliff_sensor_error,
 `510`=bumper_stuck, `513/514`=robot_trapped, `560`=side_brush_entangled, `2007/2012`=cannot_reach_target,
 `2102`=cleaning_complete. **Remaining win:** build an empirical code→meaning table (decode live codes via app pushes),
 since the q7 table is incomplete and this firmware remaps some codes.
@@ -115,41 +124,42 @@ since the q7 table is incomplete and this firmware remaps some codes.
 
 | DP | code | observed | meaning |
 |---|---|---|---|
-| `TOTAL_CLEAN_AREA` | dpTotalCleanArea | 114→198 | lifetime m² cleaned. ✅ **updates at job end, not mid-run** — jumped 114→198 (+84) after today's mop docked. |
-| `TOTAL_CLEAN_COUNT` | dpTotalCleanCount | 10→11 | lifetime number of cleans. ✅ +1 after today's run. |
-| `TOTAL_CLEAN_TIME` | dpTotalCleanTime | 204→351 | lifetime minutes cleaned. ✅ +147min (≈2.45h) = today's run length. |
-| `CLEAN_COUNT` | dpCleanCount | 2 | passes per area for *this* job (2 = clean-twice), not a room count. ✅ `s24` — `--count 2` ran ~2× the duration of a single pass (behavioural confirmation that the count = pass repetitions). |
+| `TOTAL_CLEAN_AREA` | dpTotalCleanArea | 114→198 | lifetime m² cleaned. ✅ **updates at job end, not mid-run.** |
+| `TOTAL_CLEAN_COUNT` | dpTotalCleanCount | 10→11 | lifetime number of cleans. ✅ |
+| `TOTAL_CLEAN_TIME` | dpTotalCleanTime | 204→351 | lifetime minutes cleaned. ✅ |
+| `CLEAN_COUNT` | dpCleanCount | 2 | passes per area for *this* job (2 = clean-twice), not a room count. ✅ |
 
 ## Settings (mirror app toggles; stable unless changed)
 
-> **Writing** these very likely works: action commands proved the write path
-> is fine; the earlier "settings didn't reflect" was a read-back artifact (these settings
-> aren't in the live-modeled status, so they were read from a stale `COMMON` snapshot).
-> To *prove* a specific setting, use `volume` (audible) or check the app.
+> **Writing splits two ways:** `fan`/`water`/`mode` and runtime params like
+> `CLEAN_COUNT` persist; `volume`/`child-lock`/`boost`/DND and the other stored prefs below are
+> **☁ cloud-authoritative** — the MQTT write is accepted but the server re-asserts the stored value
+> (confirmed even with the app force-closed). Set those in the app.
+>
 
 | DP | code | observed | meaning |
 |---|---|---|---|
 | `FAN_LEVEL` | dpFanLevel | 8 | suction. 8 = max_plus (`YXFanLevel`). ✅ |
 | `WATER_LEVEL` | dpWaterLevel | 3 | mop water. 3 = high (`YXWaterLevel`). ✅ |
-| `CLEAN_MODE` | dpCleanMode | 1–4, 6 | clean mode enum. The REST /jobs `cleanMode` param uses `YXCleanType` (1=vac_and_mop, 2=vacuum, 3=mop, 4=customized); the MQTT DP uses `YXDeviceWorkMode` (same codes 1–4, plus 5=save_worry, **6=sweep_mop** — sweep entire flat first, then mop). Codes 1–4 are numerically identical between both enums. **Code 6 observed** (user cycling modes in app, STATUS=8/charging). ✅ |
-| `VOLUME` | dpVolume | 55 (current) | voice volume 0–100. **☁ CLOUD-AUTHORITATIVE** (settled): `vac.py volume 70` accepted, MQTT echo returns 55. The server stores the preference and re-asserts it; MQTT write is overridden. Settable via app only. ✅ |
-| `CHILD_LOCK` | dpChildLock | 0 | 0/1. App toggle ON/OFF confirmed ✅ (echo 0→1→0). **☁ CLOUD-AUTHORITATIVE — confirmed against a live device:** `child-lock on` accepted but CHILD_LOCK echo stayed 0 (server re-asserts stored value), same as VOLUME/AUTO_BOOST. |
-| `AUTO_BOOST` | dpAutoBoost | 0 | carpet auto-boost 0/1. **☁ CLOUD-AUTHORITATIVE** (same as VOLUME — settled; re-confirmed against a live device: `boost on` echo stayed 0): earlier "CLI write didn't land" was real behaviour, not a confound. Server re-asserts stored value. App toggle confirmed ✅. ✅ |
-| `NOT_DISTURB` | dpNotDisturb | 1 | DND enabled 0/1. **☁ CLOUD-AUTHORITATIVE — confirmed against a live device:** `dnd off` accepted but NOT_DISTURB stayed 1 (never dropped to 0); `NOT_DISTURB_DATA` (the `dnd on` payload) never echoed. So BOTH CLI dnd paths are ineffective — the server owns this stored preference. Set via app. |
+| `CLEAN_MODE` | dpCleanMode | 1–4, 6 | clean mode enum. The REST /jobs `cleanMode` param uses `YXCleanType` (1=vac_and_mop, 2=vacuum, 3=mop, 4=customized); the MQTT DP uses `YXDeviceWorkMode` (same codes 1–4, plus 5=save_worry, **6=sweep_mop** — sweep entire flat first, then mop). Codes 1–4 are numerically identical between both enums. **Code 6 observed.** ✅ |
+| `VOLUME` | dpVolume | 55 (current) | voice volume 0–100. **☁ CLOUD-AUTHORITATIVE.** The server stores the preference and re-asserts it; MQTT write is overridden. Settable via app only. ✅ |
+| `CHILD_LOCK` | dpChildLock | 0 | 0/1. App toggle ON/OFF confirmed ✅. **☁ CLOUD-AUTHORITATIVE** — server re-asserts the stored value, same as VOLUME/AUTO_BOOST. |
+| `AUTO_BOOST` | dpAutoBoost | 0 | carpet auto-boost 0/1. **☁ CLOUD-AUTHORITATIVE** (same as VOLUME — settled). Server re-asserts stored value. App toggle confirmed ✅. ✅ |
+| `NOT_DISTURB` | dpNotDisturb | 1 | DND enabled 0/1. **☁ CLOUD-AUTHORITATIVE — confirmed against a live device:** BOTH CLI dnd paths are ineffective — the server owns this stored preference. Set via app. |
 | `NOT_DISTURB_EXPAND` | dpNotDisturbExpand | dict | DND sub-flags (dust/light/resume/voice). |
-| `DUST_SWITCH` | dpDustSwitch | 1 | auto-empty enabled 0/1. 🟡 (name + 0/1 value; not toggled to verify) |
+| `DUST_SWITCH` | dpDustSwitch | 1 | auto-empty enabled 0/1. **☁ cloud-authoritative** — set in app. |
 | `DUST_SETTING` | dpDustSetting | 0 | auto-empty frequency. `YXDeviceDustCollectionFrequency`: **DAILY=0**, INTERVAL_15/30/45/60. Value 0 = daily ✅ |
 | `MOP_STATE` | dpMopState | 1 | mop pad attached/engaged 0/1. 🟡 (name inference; no detach test) |
 | `MAP_SAVE_SWITCH` | dpMapSaveSwitch | true | persist map between runs. |
-| `MULTI_MAP_SWITCH` | dpMultiMapSwitch | 1, 4 | multi-floor maps. **s26 (live): observed = `4` right after toggling multi-level ON in-app — so NOT a simple bool; the earlier `1` was a guess. `4`=multi-level enabled; off-value/other semantics uncaptured. Settable via this DP.** |
+| `MULTI_MAP_SWITCH` | dpMultiMapSwitch | 1, 4 | multi-floor maps. **NOT a simple bool**; `4`=multi-level enabled, off-value/other semantics uncaptured. The value changed when the **app** toggled multi-level; CLI/MQTT set untested, presumed ☁ cloud-authoritative (same stored-pref bucket). |
 | `CLEAN_LINE` | dpCleanLine | 2 | route pattern. `YXCleanLine`: FAST=0, DAILY=1, **FINE=2** ✅ |
 | `BREAKPOINT_CLEAN` | dpBreakpointClean | 0 | resume-after-charge armed 0/1. 🟡 (name inference) |
-| `VALLEY_POINT_CHARGING` | dpValleyPointCharging | false/true | off-peak charging enabled (bool). 🟡 (observed flip false↔true when the user toggled it in-app; semantics inferred from name + the decoded `_DATA_UP` window) |
-| `VALLEY_POINT_CHARGING_DATA_UP` | dpValleyPointChargingDataUp | base64 | off-peak charging window — **same 6-byte format as `NOT_DISTURB_DATA`**: `[flag:u8, startH:u8, startM:u8, endH:u8, endM:u8, 0]`. Observed: 22:00–08:00, 22:00–01:00, 01:00–01:00. Flag byte 0xFC in all observed samples (0x00 may mean disabled, matching NOT_DISTURB_DATA pattern). ✅ window format · ⬜ flag-byte semantics |
+| `VALLEY_POINT_CHARGING` | dpValleyPointCharging | false/true | off-peak charging enabled (bool). 🟡 (semantics inferred from name + the decoded `_DATA_UP` window) |
+| `VALLEY_POINT_CHARGING_DATA_UP` | dpValleyPointChargingDataUp | base64 | off-peak charging window — **same 6-byte format as `NOT_DISTURB_DATA`**: `[flag:u8, startH:u8, startM:u8, endH:u8, endM:u8, 0]` (e.g. decodes to 22:00–08:00). Flag byte 0xFC in all observed samples (0x00 may mean disabled, matching NOT_DISTURB_DATA pattern). ✅ window format · ⬜ flag-byte semantics |
 | `LINE_LASER_OBSTACLE_AVOIDANCE` | — | 1 | obstacle avoidance on 0/1. |
 | `CARPET_CLEAN_TYPE` | dpCarpetCleanType | 0 | carpet handling mode. 🟡 (name inference; only the constant `0` seen, never varied) |
 | `GROUND_CLEAN` | dpGroundClean | 0 | ⬜ opaque — only the constant `0` seen; no inferable meaning beyond the name. |
-| `BACK_TYPE` | dpBackType | 5 | return-to-dock reason. `YXBackType`: IDLE=0, **BACK_DUSTING=4** (✅ now observed against a live device, during auto-empty on dock return), **BACK_CHARGING=5** ✅ |
+| `BACK_TYPE` | dpBackType | 5 | return-to-dock reason. `YXBackType`: IDLE=0, **BACK_DUSTING=4** ✅, **BACK_CHARGING=5** ✅ |
 | `CLEAN_TASK_TYPE` | dpCleanTaskType | 1 | `YXDeviceCleanTask`: IDLE=0, **SMART=1** (full auto), ELECTORAL=2 (room select), DIVIDE_AREAS=3, CREATING_MAP=4, PART=5 ✅ |
 | `ADD_CLEAN_STATE` | dpAddCleanState | 0 | second-pass / add-clean active. 🟡 (name inference; pairs with `ADD_CLEAN_AREA`) |
 | `TIMER_TYPE` | dpTimerType | 1 | schedule kind. 🟡 (name inference; not cross-referenced to a set timer) |
@@ -157,36 +167,37 @@ since the q7 table is incomplete and this firmware remaps some codes.
 
 ## Spatial & map-config formats (decoded, read-only over MQTT)
 
-**Provenance:** decoded from a monitored app session (2026-06-12) where the user
-drew/edited each feature and the robot echoed it on its OUTPUT topic. **`_UP` DPs are device→app *reports*** — reading them is ✅ confirmed.
-**SETTING any of these is 🔒 blocked** (round-trip test 2026-06-12: 4 send variants for
-`VIRTUAL_WALL` never changed the wall count — the real write command rides the MQTT INPUT
-topic the broker won't let us subscribe to; same root cause as room-select cleaning).
+**Provenance:** decoded from a monitored app session (2026-06-12).
+
+**`_UP` DPs are device→app *reports*** — reading them is ✅ confirmed.
+**SETTING any of these is 🔒 blocked** — the real write command rides the MQTT INPUT
+topic the broker won't let us subscribe to; same root cause as room-select cleaning.
+
 **Coordinate frame:** **stored values are in 0.5 mm units — multiply by 2 to get path mm.**
-Wall binary order is `(y,x)` (confirmed: gives vertical lines matching app display). Zone/carpet
+Wall binary order is `(y,x)`. Zone/carpet
 coords are `(x,y)`. Use `_mm_to_pixel(..., coord_scale=2)` — baked into `decode_map.py`.
-Calibrated via two known walls (master/living boundary + kitchen/living diagonal); k≈1.98 from
-both axes (DESIGN_NOTES.md). ✅ = decode confirmed, 🟡 = inferred/partial.
+Calibrated via two known walls (see DESIGN_NOTES.md). ✅ = decode confirmed, 🟡 = inferred/partial.
+
 
 | DP | format (decoded) | provenance / confidence |
 |---|---|---|
-| `VIRTUAL_WALL_UP` | base64 `[count:u8]` + per wall `(y1,x1,y2,x2)` BE int16 (mm). ⚠ byte order is **(y,x)** not (x,y) — confirmed empirically vs app display. e.g. wall (y=-809,x=-834)→(y=-814,x=-1152). `decode_map.py:parse_virtual_walls` parses this correctly. | Drew 2 walls → count 1→2. ✅ decode confirmed · 🔒 set blocked |
-| `RESTRICTED_ZONE_UP` | base64 `[0x01][count:u8]` + per zone: `[type:u8][nverts:u8=4]` + 4×`(x,y)` BE int16 + 20B zero-pad = 38 B/zone. **type values (s26 GROUND-TRUTH — drew each, watched the echo):** `0x00`=no-go rect; **`0x02`=no-mop rect (CONFIRMED — drew a no-mop, it returned type `0x02`, NOT the `0x01` we'd inferred)**; `0x03`=door-threshold (thin rotated quad ~70×220mm). **`parse_restricted_zones` FIXED s26:** zones are in FIXED 38-B slots (the old tight-packed parse mis-read a no-go's zero-pad as a 2nd empty zone when count>1, and missed the real next zone); `load_dp_overlay` now uses want_type=`0x02` for no-mop. | Captured 0x00+0x02 live (s26) + 0x03 (2026-06-13). ✅ decode (count>1 fixed s26) · 🔒 set blocked |
-| `ZONED_UP` | base64 **same scheme as `RESTRICTED_ZONE_UP`**: `[0x01][count:u8]` + per zone: `[type:u8][nverts:u8=4]` + 4×`(x,y)` BE int16 (mm). type=0x01 → cleaning zone. `AQAA`=empty (count=0). | ✅ format confirmed (multi-record verify: 17B→2 walls, 25B→3 walls cross-validated). `decode_map.py:parse_restricted_zones` handles both. 🔒 set blocked |
-| `CARPET_UP` | JSON `{data:[{id, rug_clean_mode, vertexs:[[x,y]×4]}], op:"list"}`; write echoes `{op:"save",result:1}`. coords (x,y) in mm. | Drew a 200×200 mm carpet (id 101). ✅ decode · 🔒 set |
-| `FLOOR_MATERIAL` | base64 `[01][n_rooms:u8]` + per room `(room_id:u8, material:u8)`. Material = `YXRoomMaterial`: 0=horiz-floorboard, 1=vert-floorboard, **2=ceramic tile**, **255=other**. | User toggled room 6 tile↔other; confirmed 2=tile / 255=other. ✅ confirmed |
-| `RESET_ROOM_NAME` | base64 `[01][room_id:u8][00][namelen:u8][name…]`. | Renamed room 2 → "Test". ✅ decode · 🔒 set |
-| `ROOM_SPLIT` / `ROOM_MERGE` | scalar ack (`=1`); the geometry change is in the regenerated grid, not a coord DP. | Split room 2. ✅ observed · 🔒 set |
-| `REMOVE_ZONED_UP` | `{op:"save",result:1}` (ack). | Removed a zone. ✅ |
-| `RESTRICTED_AREA_UP` / `CLIFF_RESTRICTED_AREA_UP` / `SUSPECTED_THRESHOLD_UP` | base64 list (presumed same scheme). | All stayed `[]` (unused — thresholds went to RESTRICTED_ZONE). 🟡 |
+| `VIRTUAL_WALL_UP` | base64 `[count:u8]` + per wall `(y1,x1,y2,x2)` BE int16 (mm). ⚠ byte order is **(y,x)** not (x,y). e.g. wall (y=-809,x=-834)→(y=-814,x=-1152). `decode_map.py:parse_virtual_walls` parses this correctly. | ✅ decode confirmed · 🔒 set blocked |
+| `RESTRICTED_ZONE_UP` | base64 `[0x01][count:u8]` + per zone: `[type:u8][nverts:u8=4]` + 4×`(x,y)` BE int16 + 20B zero-pad = 38 B/zone. **type values:** `0x00`=no-go rect; **`0x02`=no-mop rect**; `0x03`=door-threshold (thin rotated quad ~70×220mm). Zones are in **FIXED 38-B slots**; `load_dp_overlay` uses want_type=`0x02` for no-mop. | ✅ decode confirmed · 🔒 set blocked |
+| `ZONED_UP` | base64 **same scheme as `RESTRICTED_ZONE_UP`**: `[0x01][count:u8]` + per zone: `[type:u8][nverts:u8=4]` + 4×`(x,y)` BE int16 (mm). type=0x01 → cleaning zone. `AQAA`=empty (count=0). | ✅ format confirmed. `decode_map.py:parse_restricted_zones` handles both. 🔒 set blocked |
+| `CARPET_UP` | JSON `{data:[{id, rug_clean_mode, vertexs:[[x,y]×4]}], op:"list"}`; write echoes `{op:"save",result:1}`. coords (x,y) in mm. | ✅ decode · 🔒 set |
+| `FLOOR_MATERIAL` | base64 `[01][n_rooms:u8]` + per room `(room_id:u8, material:u8)`. Material = `YXRoomMaterial`: 0=horiz-floorboard, 1=vert-floorboard, **2=ceramic tile**, **255=other**. | ✅ confirmed |
+| `RESET_ROOM_NAME` | base64 `[01][room_id:u8][00][namelen:u8][name…]`. | ✅ decode · 🔒 set |
+| `ROOM_SPLIT` / `ROOM_MERGE` | scalar ack (`=1`); the geometry change is in the regenerated grid, not a coord DP. | ✅ observed · 🔒 set |
+| `REMOVE_ZONED_UP` | `{op:"save",result:1}` (ack). | ✅ |
+| `RESTRICTED_AREA_UP` / `CLIFF_RESTRICTED_AREA_UP` / `SUSPECTED_THRESHOLD_UP` | base64 list (presumed same scheme). | Unused — thresholds went to RESTRICTED_ZONE. 🟡 |
 | `CLEAN_RECORD` | `{data:[<underscore-string per clean>], op:...}` — 12 underscore fields per clean (`id·epoch·`**`duration_min`**`·f3·f4·`**`area×1000`**`·t1·water·mode·route·`**`pass`**`·ok`); **format cracked over a 22-record corpus.** The remaining open part is the live **fetch** (`op:list` is app/push-only). **Full field map, worked example, and the fetch RE → [CLEAN_RECORD detail](#clean_record-detail) below.** | ⚠️ format cracked; **live fetch still UNSHIPPED** |
 | `CLEAN_EXPAND` | dpCleanExpand | `{room_id_list:[ids]}` or `{}` | Robot's **echo of the room selection for the current job** (a report, not a command). Appears at clean start for ELECTORAL task type. e.g. `{"room_id_list":[1]}` = robot is cleaning room 1. `{}` = full-home clean (no selection). ✅ seen in live captures |
 | `CUSTOMER_CLEAN` | dpCustomerClean | base64 blob (440–504 B) | **Room directory** — same per-room record format as the map's trailing block: `[count:u8]` + N×47B records (id + name). Appears once per session on request. Already read more reliably from the LZ4 map via `vac.py rooms`. ✅ |
-| `ADD_CLEAN_AREA` | dpAddCleanArea | `AQAA` (base64) | "Add clean area" marker. `AQAA` = `[0x01, 0x00, 0x00]`, **constant across s23+s24** — appears at the fault-RECOVERY moment (around each transient 501), so it reads as a flag, not a varying counter. Exact function ⬜ (see the fuller entry in *Live cleaning state* above). |
-| `NOT_DISTURB_DATA` | base64 packed bytes `[flag, startH, startM, endH, endM, ?]` (read). `[0,22,0,8,0,0]` = 22:00–08:00. (`cmd_dnd` *writes* a JSON dict — write path unconfirmed.) | ✅ read decode |
-| `TIMER` | base64; observed minimal `[1,252,0,0]` (no schedule set). | 🟡 format unknown |
-| `MULTI_MAP` | `{op:"list"}` → map list `[{id,name,timestamp}]`; `{op:"update"}`/`{op:"notify"}` on edits. The `0101` grid arrives as protocol-301, NOT here. **s26 op surface CONFIRMED (captured the app doing each, live): `list` / `update`(rename: id+timestamp stable, only name changes) / `select`({id,name}); `delete` inferred (not captured). Map `id` ≈ creation unix-epoch. Multi-level (`MULTI_MAP_SWITCH=4`) PRESERVES existing maps — built a new map alongside the old.** | ✅ read + ops observed live → a `map rename/select/delete` CLI is buildable (ROADMAP) |
-| `RECENT_CLEAN_RECORD` | bool; per-run history flag (false unless requested). | ✅ |
+| `ADD_CLEAN_AREA` | dpAddCleanArea | `AQAA` (base64) | "Add clean area" marker. `AQAA` = `[0x01, 0x00, 0x00]` — appears at the fault-RECOVERY moment (around each transient 501), so it reads as a flag, not a varying counter. Exact function ⬜ (see the fuller entry in *Live cleaning state* above). |
+| `NOT_DISTURB_DATA` | base64 packed bytes `[flag, startH, startM, endH, endM, ?]` (read). `[0,22,0,8,0,0]` = 22:00–08:00 (an observed sample; the start hour is just the user's DND setting — a later capture read 23:00). (`cmd_dnd` *writes* a JSON dict — write path unconfirmed.) | ✅ read decode |
+| `TIMER` | base64; observed minimal `[1,252,0,0]` (no schedule set), `TIMER_TYPE`=1. | 🟡 format unknown — **CONSTANT across every capture**, so NOT offline-decodable; needs an on-device timer set while capturing (or the MITM-gated write path). |
+| `MULTI_MAP` | `{op:"list"}` → map list `[{id,name,timestamp}]`; `{op:"update"}`/`{op:"notify"}` on edits. The `0101` grid arrives as protocol-301, NOT here. **op surface CONFIRMED:** `list` / `update`(rename: id+timestamp stable, only name changes) / `select`({id,name}); `delete` inferred (not captured). Map `id` ≈ creation unix-epoch. Multi-level (`MULTI_MAP_SWITCH=4`) **PRESERVES existing maps**. | ✅ ops *observed* live (the app's) — but our own `MULTI_MAP` op-sends get no reply, so a write CLI (rename/select/delete) is not reachable over MQTT; map *enumeration* is readable passively or via REST `/v4/user/homes` |
+| `RECENT_CLEAN_RECORD` | bool; `true` = a recent clean exists (distinct from the `CLEAN_RECORD` data list). | ✅ |
 
 ### CLEAN_RECORD detail
 
@@ -194,7 +205,7 @@ both axes (DESIGN_NOTES.md). ✅ = decode confirmed, 🟡 = inferred/partial.
 `0:id` (16-char opaque) · `1:epoch` (clean START, unix sec UTC; +TZ=local) · **`2:duration_MINUTES`** ·
 `3:f3` (~0.55×dur; likely effective/mop minutes, med conf) · `4:f4` (slow device accumulator — **not** duration,
 low conf) · **`5:area_m²×1000`** (12053 → 12.05 m²) · **`6:t1`** (monotonic accumulator/sequence counter —
-**not** fan level; the old "4=fan MAX" reading was coincidence) · `7:water` (YXWaterLevel — 🟡 *mode-correlated*
+**not** fan level) · `7:water` (YXWaterLevel — 🟡 *mode-correlated*
 across 22 records, not write-verified: vacuum→0, vac_mop→{0,1,3,4}, mop→{0,1}; value **`4` exceeds the YXWaterLevel
 max (3)** — an unconfirmed possible 4th/custom level) · `8:mode` (YXCleanType) · `9:route` (YXCleanLine — 🟡
 corpus-inferred) · **`10:pass_count`** (1 or 2) · `11:ok` (1 done / 0 aborted).
@@ -205,13 +216,13 @@ water off, vacuum-only, daily route, 1 pass, completed.
 **Fetch RE (the open part — blocks a live `vac.py history`).** `op:"list"` → the robot replies with the full
 `data[]` history (12–18 records); `op:"notify"` = a single live "clean finished" event (coincides with
 `TOTAL_CLEAN_COUNT`+1); `op:"select"`/`op:"delete"` = per-record detail/delete acks.
-- **s23 — `op:list` is not pull-able by us:** `command.send(CLEAN_RECORD,{op:list})` got no reply across 2 sessions,
-  while the identical `command.send(MULTI_MAP,{op:list})` works (the `map` command uses it). The captured `op:list`
-  `data[]` replies were almost certainly **app-triggered pushes** → CLEAN_RECORD `op:list` looks **push-only**
-  (robot→app, post-clean / history-screen), not pull-able like MULTI_MAP.
-- **s26 — mitm'd the history screen:** the trigger is **MQTT, not REST** (the proxy saw no history endpoint);
-  opening an entry = `op:"select"` (ack only, no data). A CLI `op:"list"` fired with the app **closed** got no reply
-  in 45 s → bare `op:list` is **definitively insufficient.** Only path left = a transparent MQTT MITM (:8883) to
+- **`op:list` is not pull-able by us:** `command.send(CLEAN_RECORD,{op:list})` got no reply.
+  (`command.send(MULTI_MAP,{op:list})` triggers the 301 grid frame the `map` command uses — but it
+  does NOT return the map-LIST dps either; that list is app-triggered too. See Map management.) The captured
+  `op:list` `data[]` replies were almost certainly **app-triggered pushes** → CLEAN_RECORD `op:list` looks
+  **push-only** (robot→app, post-clean / history-screen), not pull-able.
+- **The history-screen trigger is MQTT, not REST** (the proxy saw no history endpoint);
+  opening an entry = `op:"select"` (ack only, no data). Bare `op:list` is **definitively insufficient.** Only path left = a transparent MQTT MITM (:8883) to
   capture the app's exact publish.
 
 ## Map & position — MQTT protocol 301 (NOT a dps DP)
@@ -230,8 +241,7 @@ active clean** (confirmed 2026-06-12):
 | `0x0101` grid | ~7.7KB | LZ4-compressed occupancy grid (`pixel//4=room_id`, 243=outside, 249=wall) + trailing room-name records; W/H read from the header; byte `[6]` = map-finalized flag. **Rendered** by `decode_map.py` → `map_rooms.png` + `map_overlay.png` (colour-coded, labeled, path overlaid). *(our main single-floor map: 222×261 px, 7 named rooms — varies per home; example header `0101<map-id><ver>`, bytes 2-5 = per-map id.)* | ✅ decoded + rendered + georeferenced |
 
 **→ Full byte-level decode is single-sourced in [FRAME_ANATOMY.md](FRAME_ANATOMY.md)** — every offset, the
-declared/compressed-size fields, the 47-byte room-record layout, the W/H `424/424` and byte-`[6]` `89/89`
-verifications, the `raw[11:25]` sub-structure, the historical `bytes[8:10]`-as-LE→`478` correction, and the
+declared/compressed-size fields, the 47-byte room-record layout, the `raw[11:25]` sub-structure, and the
 georeference algorithm + per-install origin (≈99.87 % on-floor fit). Machine-checkable header
 schema: [frames.ksy](frames.ksy). *(This dictionary catalogs DPs; the frame format lives there so it has one
 home.)*
@@ -277,7 +287,7 @@ single REST call, no MQTT session needed. Fields (numeric code → name):
 | 139 | BACK_TYPE | 5 |
 
 Could back a `vac.py status --quick` that skips device_session setup (no MQTT connect,
-no waiting for status frames). Subset of what `status` shows but much faster. 🟡 (the 11 Shadow fields are ✅ from a live Shadow `GET`; the proposed `status --quick` path itself is untested).
+no waiting for status frames). Subset of what `status` shows but much faster. **`status --quick` BUILT** ✅ — legacy v1 dp space.
 
 ## Never-seen notable DPs (48 total; most are command/write-only)
 
@@ -308,10 +318,10 @@ DPs in the enum that never appeared in any of our 7 capture files. Grouped by li
 
 - **Map units/origin:** ✅ RESOLVED (2026-06-12). Path is mm; grid↔path georeference confirmed
   at 99.87 % (see DESIGN_NOTES.md). `map_overlay.png` produced by `decode_map.py`.
-- **`CLEAN_RECORD` t1 field — RESOLVED:** NOT fan level. Across 22 chronologically-sorted records it is strictly non-decreasing (4→12→154→192→230) and identical for cleans with different fan/water/mode/area → a **monotonic accumulator / sequence counter**, not a per-clean parameter. The "4=fan MAX" reading was coincidence. Exact unit still open (record-sequence or runtime tick) but it is definitively not a clean attribute. See the corrected `CLEAN_RECORD` row above.
+- **`CLEAN_RECORD` t1 field — RESOLVED:** NOT fan level — a **monotonic accumulator / sequence counter**, not a per-clean parameter. Exact unit still open (record-sequence or runtime tick) but it is definitively not a clean attribute. See the corrected `CLEAN_RECORD` row above.
 - **`CLEAN_RECORD` f2/f3:** unknown fields at positions 2-3. Not duration, not area. Possibly room_count and segment_count or obstacle encounter count.
   - ❓ **Reported cross-reference (openHAB roborock binding, `api/dto/GetCleanRecord.java`, source-verified 2026-06-16):** their `Result` DTO declares, **in order**: `begin, end, duration, area, error, complete, start_type, clean_type, finish_reason, dust_collection_status, avoid_count, wash_count, map_flag, cleaned_area, manual_replenish, dirty_replenish, clean_times`. **Caveat — this is the *classic-protocol JSON* DTO, a different SERIALIZATION from our B01 underscore string, so the order will NOT line up positionally.** Use it only as a vocabulary of *candidate meanings* for our still-unknown positions: our `f3` (~0.55×dur) and `f4` (slow accumulator) are plausibly a second time/`finish_reason`/`avoid_count`; our `f6` monotonic accumulator could be `map_flag` or a sequence id. **Verify against our positional decode before promoting any to ✅.** Note their DTO has no explicit `water`/`route`/`pass` ints (which our B01 string carries at f7/f9/f10), confirming the two formats are not a relabel of each other. (openHAB binding — see [CREDITS.md](CREDITS.md).)
 - **`CLEANING_PROGRESS` (code 141):** never seen — what triggers it vs `CLEAN_PROGRESS` (87)?
 - **`VALLEY_POINT_CHARGING_DATA_UP` flag byte:** 0xFC in all observed samples. Meaning unknown.
-- **`AREA_UNIT=0`:** seen once (2026-06-12T22:13:40, STATUS=8). Presumably ft² but single sample only.
-- **`CLEAN_LINE`, `BACK_TYPE`, `CLEAN_TASK_TYPE`, `BREAKPOINT_CLEAN`:** ✅ meanings confirmed from enum; `BACK_TYPE`=5 (BACK_CHARGING) in normal docking, and **=4 (BACK_DUSTING) confirmed against a live device** during the auto-empty cycle on dock return. `CLEAN_TASK_TYPE`=2 confirmed live = room/segment clean (vs 1=full).
+- **`AREA_UNIT=0`:** seen once. Presumably ft² but single sample only.
+- **`CLEAN_LINE`, `BACK_TYPE`, `CLEAN_TASK_TYPE`, `BREAKPOINT_CLEAN`:** ✅ meanings confirmed from enum; `BACK_TYPE`=5 (BACK_CHARGING) in normal docking, **=4 (BACK_DUSTING)** during the auto-empty cycle on dock return. `CLEAN_TASK_TYPE`=2 = room/segment clean (vs 1=full).

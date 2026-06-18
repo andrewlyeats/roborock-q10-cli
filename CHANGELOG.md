@@ -5,6 +5,51 @@ Notable changes to this project. Format loosely follows
 undocumented cloud protocol and relies on `python-roborock` internals, each release notes the
 environment it was **validated against** — check that before trusting it on a newer stack.
 
+## [0.1.1] — 2026-06-18
+
+Live-validation + reference-accuracy work (sessions **s27–s28**), same stack as 0.1.0 (Q10 S5+,
+firmware **03.11.24**, `python-roborock` **5.14.x**): a fast REST status command, plus a broad docs
+accuracy/readability pass.
+
+### Added
+- **`status --quick`** — fast device status via the REST device-shadow endpoint (`GET /devices/{duid}/shadow`):
+  one Hawk-signed GET, **no MQTT session and no daemon needed** (so it can't trip the `135` connection cap).
+  Surfaces state / battery / fan / consumable work-times. Note it reads the **legacy v1 dp space**
+  (`RoborockStateCode`: `8`=charging agrees, but a cleaning robot reads as v1 `5`/`17`/`18`, not the B01
+  `101–105` codes) — distinct from the MQTT `status`. Endpoint validated live (s28). See [CAPABILITIES.md](CAPABILITIES.md).
+- **`drive <forward|left|right|stop|exit>`** — manual remote-drive command (B01 `RemoteTrait`). Built,
+  but **proven inert on this firmware**: CLI `REMOTE` writes never move the robot or reach `STATUS=7`,
+  while the *same* drive from the Roborock app does — manual drive rides the robot's **blocked input
+  topic** (the same wall as settings / wall-edit writes). Kept as an honestly-labelled RE artifact; the
+  way forward is a MITM of the app's drive frames. See [CAPABILITIES.md](CAPABILITIES.md) (Manual drive).
+- **`raw --common`** — wrap a data-point as `COMMON{DP: value}` (the robot's input channel the library
+  uses for `REMOTE`) instead of a bare `command.send(DP, value)`. A write-path probe: it confirmed that
+  COMMON-wrapping does **not** land a write the bare send misses (settings and `START_BACK` all stayed put).
+
+### Changed
+- **`decode_map.py` reports the robot from the *latest* path frame, not the largest.** On a multi-clean
+  capture the biggest frame can be an earlier/larger room, which placed the robot in the wrong room;
+  "where is it now" now uses the most-recent frame, while the georeference fit still uses the most-complete
+  frame (most points → best registration). `decode_map.py --json` gains a `path_frame_selection` note.
+
+### Findings (live, s27) — docs only
+- **The write path is now mapped per-DP across the whole settings surface.** Every *reportable* stored
+  preference is cloud-authoritative (MQTT writes don't stick, bare or COMMON-wrapped), while runtime
+  cleaning params incl. `CLEAN_COUNT` are settable. `CAPABILITIES.md` / `DP_DICTIONARY.md` updated DP-by-DP.
+- **`STOP` promoted to validated ✅** — halts an active clean if caught before it commits to docking.
+- **Manual drive reclassified to 🔴 app-only** (see Added). The four structured action DPs
+  (`TASK_CANCEL_IN_MOTION` / `JUMP_SCAN` / `GROUND_CLEAN` / `BEAK_CLEAN`) and `START_BACK` are no-ops via a
+  bare send.
+- New observations: `STATUS=2`=sleeping; `FAULT 556`=relocalize-failure (the physical trigger is left as an
+  explicit open question); `MULTI_MAP op:list` is readable **passively** (the robot answers the app's list —
+  watch while the app opens its map screen); and several structured DPs decoded from live values (`TIMER`,
+  `NOT_DISTURB_DATA`, `ADD_CLEAN_AREA`, …).
+
+### Docs
+- Accuracy + readability pass across the protocol reference (PROTOCOL / CAPABILITIES / DP_DICTIONARY /
+  DESIGN_NOTES / FRAME_ANATOMY / ROADMAP): reconciled cross-doc contradictions, leaned out the public copy,
+  and sharpened onboarding (clone step + interpreter caveat) and the capability "open frontier" summary.
+
 ## [0.1.0] — 2026-06-17
 
 First public release — the reverse-engineering reference + CLI for the Roborock Q10 (B01) cloud protocol.
@@ -68,7 +113,8 @@ First public release — the reverse-engineering reference + CLI for the Roboroc
 - Daemon persistent connection is now **validated live** (holds one connection, survives a clean cycle,
   cheap restart) — but **135 cool-down recovery** is still unproven; `--force` one-shot remains the fallback.
 - One fault-free complete physical room clean is still pending (a supervised run reached the room but the
-  robot trapped on the return and needed a manual reset).
+  robot trapped on the return and needed a manual reset). *(Reframed post-0.1.0: the recurring doorway `501`
+  is the apartment's fixed, unchangeable sill — environmental, not a project goal. See Unreleased.)*
 - `history` parser is written, but the live `op:list` **request** path returns nothing yet — pending.
 
 ### Notes
