@@ -4,7 +4,7 @@ Roborock Q10 S5+ controller  (B01 / cloud-MQTT protocol)
 
 The Q10 S5+ speaks Roborock's "B01" protocol, which is MQTT-only — there is no
 local TCP control channel (unlike older S-series "V1" devices). Every command is
-relayed through Roborock's cloud broker. See DESIGN_NOTES.md for the why.
+relayed through Roborock's cloud broker. See PROTOCOL.md for the why.
 
 Setup (first time only):
   ./vac.py login --email your@email.com
@@ -17,7 +17,7 @@ Control:
   ./vac.py dock                            # return to dock
   ./vac.py dock-empty                      # trigger dock auto-empty
   ./vac.py find                            # play locate beep
-  ./vac.py drive <forward|left|right|stop|exit>   # manual remote drive — built, but app-only/inert on this fw (see CAPABILITIES)
+  ./vac.py drive <forward|left|right|stop|exit>   # manual remote drive — MOVES robot & can strand it; ✅ CLI validated live 2026-06-19 (reaches remote_control_active, physical motion) (see CAPABILITIES)
   ./vac.py fan <quiet|balanced|turbo|max|max_plus>
   ./vac.py water <off|low|medium|high>
   ./vac.py mode <vac_and_mop|vacuum|mop>
@@ -29,15 +29,20 @@ Control:
   ./vac.py watch --bytes [--out log.jsonl] # capture EVERY raw MQTT frame (incl. binary/map)
   ./vac.py map [--timeout N] [--out PREFIX] # render the map → PREFIX_rooms.png / PREFIX_path.svg (default "map")
   ./vac.py rooms                           # list rooms on the current map (id + name)
+  ./vac.py zone <list | add <no-go|no-mop|threshold> x1 y1 x2 y2 | clear>   # restricted zones (DP 54; map edit, no motion)
+  ./vac.py wall <list | add x1 y1 x2 y2 | clear>      # virtual walls (DP 56; map edit, no motion)
+  ./vac.py multimap list                   # list saved maps (read-only; select/switch omitted)
   ./vac.py clean-rooms <name|id>...        # clean only the named/numbered rooms via REST /jobs
       [--fan <level>]  [--water <level>]  [--mode <mode>]
       [--route fast|daily|fine]  [--count 1|2]
       [--dry-run]                          # post job, verify in list, delete before it fires
   ./vac.py consumables                     # brush/filter/sensor life %
-  ./vac.py history [--json]               # clean history (live op:list pull is app/push-only — WIP)
+  ./vac.py history [--json]               # clean history — live op:list pull (s30: 25 records) ✅
+  ./vac.py history --record <id> [--json] # fetch one record's op:select detail (RE; returns an ACK — fields already in op:list)
   ./vac.py history --from-capture F.jsonl [--json]  # decode clean history from a watch/echo capture (offline)
   ./vac.py dnd <on|off> [--start HH:MM] [--end HH:MM]
   ./vac.py raw <DP_NAME> [json_value]      # send any raw data-point command
+  ./vac.py read <DP_NAME>                  # read one DP's current value (REQUEST_DPS; read-only)
 
   ./vac.py schedule list                   # show cloud schedules (id · time · rooms)
   ./vac.py schedule enable <id>
@@ -104,8 +109,8 @@ logging.getLogger("roborock").setLevel(logging.ERROR)
 # module paths) that carry no API-stability guarantee. ALL such imports are
 # centralized HERE so a breaking library upgrade is a one-line fix in ONE place
 # rather than a hunt through the file. After any `pip install -U python-roborock`,
-# run ./check_roborock_api.py to confirm these still exist. See DESIGN_NOTES
-# 'dependency fragility' / ROADMAP #12 / the project docs.
+# run ./check_roborock_api.py to confirm these still exist. See PROTOCOL
+# 'dependency fragility' / CAPABILITIES #12 / the project docs.
 try:
     from roborock import B01Fault
     from roborock.data import UserData
@@ -126,7 +131,7 @@ except ImportError as _exc:  # environment / upgrade guard
         f"python-roborock internal import failed: {_exc}\n"
         "Likely the wrong interpreter (run ./vac.py, or use the conda env / Python "
         ">=3.11), or a breaking library upgrade. Run ./check_roborock_api.py to see "
-        "exactly what moved (see the project docs / DESIGN_NOTES 'dependency fragility')."
+        "exactly what moved (see the project docs / PROTOCOL 'dependency fragility')."
     )
 
 
@@ -145,7 +150,7 @@ def _hawk_auth(rriot, url: str, formdata: dict | None = None,
     """Build a Hawk ``Authorization`` header for the Roborock REST API.
 
     Vendored from python-roborock ``web_api._get_hawk_authentication`` (v5.14.2) so
-    vac.py does not depend on a private library function (ROADMAP #12). GET requests
+    vac.py does not depend on a private library function (CAPABILITIES #12). GET requests
     sign the path only. PUT/POST JSON bodies are signed via ``json_body``: the
     server validates ``md5(compact_json(body))`` in the formdata slot (confirmed
     by cross-checking app-captured MACs against all signing variants, session 17).
@@ -180,20 +185,26 @@ CACHE_FILE = pathlib.Path("~/.roborock_vac_cache.pkl").expanduser()
 ACTION_TIMEOUT = 10
 # Status arrives asynchronously across several MQTT frames after REQUEST_DPS.
 STATUS_TIMEOUT = 10
+# When `status` is served by the daemon it returns the daemon's last-known shadow, which
+# keeps its prior values even after the robot goes offline. A healthy daemon refreshes that
+# shadow every ~15–30s (stream) and pokes a keepalive every 30s, so a frame older than this
+# means the robot has likely gone offline/sleeping — warn instead of serving it as live.
+# (Reliability fix 2026-06-19; the 88-min stale "idle/75%" incident — PROTOCOL/CAPABILITIES.)
+STALE_AFTER_S = 90
 
 
 # ── cloud connection rate-limit handling ───────────────────────────────────────
 # vac.py opens a fresh MQTT session per invocation. Firing many commands quickly
 # (e.g. polling `status` in a loop) can trip an ACCOUNT-LEVEL connection rate-limit:
 # the broker then refuses new sessions with `code 135 Not authorized`, which also
-# knocks out the phone app until it cools off (minutes–~1h). See DESIGN_NOTES s20 +
-# DESIGN_NOTES.md. We turn that cryptic crash into a clear message, and for read-only
+# knocks out the phone app until it cools off (minutes–~1h). See PROTOCOL s20 +
+# PROTOCOL.md. We turn that cryptic crash into a clear message, and for read-only
 # commands retry a couple of times with backoff in case it's a brief throttle.
 _THROTTLE_MSG = (
     "\nCloud MQTT connection refused — rate-limited / not authorized (code 135).\n"
     "Too many connections in a short window. Wait a few minutes, then retry.\n"
     "Tip: for monitoring run ONE `./vac.py watch --raw --out log.jsonl` and read the file;\n"
-    "don't poll `status` in a loop (each call opens a new MQTT session). See DESIGN_NOTES.md."
+    "don't poll `status` in a loop (each call opens a new MQTT session). See PROTOCOL.md."
 )
 
 
@@ -244,9 +255,21 @@ def _classify_error(exc: BaseException) -> str:
     return "other"
 
 
+def _counts_toward_reauth_giveup(exc: BaseException) -> bool:
+    """Whether a failed reconnect should count toward the `_MAX_RECONNECTS` → `needs_login` give-up.
+
+    Only a *cloud refusal* (135 throttle / auth / rate-limit / unexpected) should — those are what
+    "credentials revoked" looks like. A local/transport outage (`_classify_error` == "network":
+    ConnectionError / OSError / TimeoutError) must NOT march toward `needs_login`, which would falsely
+    tell the user to re-login when the creds are fine and the network is just down. We keep retrying with
+    backoff instead; the library's own reconnect rides out transient drops. (ext-review 2026-06-18; #14.)
+    """
+    return _classify_error(exc) != "network"
+
+
 _ERROR_HINTS = {
     "mqtt-throttle(135)": "Account-level MQTT connect throttle — the app shares this limit. Wait "
-                          "several minutes; do NOT reconnect hard (that extends it). See DESIGN_NOTES.md.",
+                          "several minutes; do NOT reconnect hard (that extends it). See PROTOCOL.md.",
     "rest-rate-limit":    "REST rate-limit (e.g. the ~15/hr home_data bucket). Slow down and avoid "
                           "daemon restart churn.",
     "auth":               "Credentials may be expired/revoked. Run ./vac.py login, then "
@@ -262,7 +285,7 @@ _ERROR_HINTS = {
 # A long-running daemon holds ONE python-roborock DeviceManager open and serves the
 # CLI over a Unix socket, so every command rides a single cloud connection instead
 # of a new MQTT session per invocation (which trips the account-level connect
-# throttle — see _THROTTLE_MSG / DESIGN_NOTES s20). When the daemon is running it sets
+# throttle — see _THROTTLE_MSG / PROTOCOL s20). When the daemon is running it sets
 # _INJECTED_SESSION; device_session then hands every existing cmd_* that one held
 # session transparently, so command logic is shared verbatim between the daemon and
 # the standalone `--force` path. Architecture credits in CREDITS.md.
@@ -270,7 +293,7 @@ DAEMON_PROTO = 1                       # bump when the socket protocol changes
 # Escalating cool-down (seconds) between reconnect attempts after a 135 throttle, so
 # we don't hammer the broker during an active ban (which only extends it). After this
 # many consecutive failures the daemon gives up and requires a manual login — retrying
-# revoked credentials forever is just noise to the server. (DESIGN_NOTES s21; server-view.)
+# revoked credentials forever is just noise to the server. (PROTOCOL s21; server-view.)
 _RECONNECT_BACKOFF = [120, 300, 900, 900, 900]
 _MAX_RECONNECTS = len(_RECONNECT_BACKOFF)
 SOCK_PATH = pathlib.Path("~/.roborock_vacd.sock").expanduser()
@@ -291,6 +314,12 @@ EXIT_NEEDS_LOGIN = 77   # EX_NOPERM    — credentials revoked / interactive log
 # Set by the running daemon to (device, props); makes device_session reuse the held
 # session instead of opening a new one. None in the standalone/--force path.
 _INJECTED_SESSION = None
+# Set by the running daemon to a zero-arg getter returning its current `last_update`
+# (the time of the most recent live frame; advanced by the daemon's _consume loop). Lets
+# cmd_status age-check the held shadow and warn when it's stale. None in the standalone
+# path, where every read is freshly fetched (so never stale). Read it AFTER fetch_status —
+# an online refresh advances last_update, an offline one leaves it old. See _shadow_staleness.
+_INJECTED_LAST_UPDATE = None
 
 
 # ── credentials ───────────────────────────────────────────────────────────────
@@ -402,17 +431,6 @@ async def fetch_status(props, timeout: int = STATUS_TIMEOUT):
     return props.status
 
 
-# Stored user-preference settings (volume/child-lock/auto-boost) are cloud-authoritative:
-# the MQTT write is accepted by the broker but the server re-asserts the saved value on the
-# next sync, so the change does not stick from the CLI. There is no usable write channel for
-# these (the app persists them over the MQTT *input* topic we cannot publish to — confirmed
-# DESIGN_NOTES s18 / internal notes). We send anyway (harmless) but must not claim it persisted.
-CLOUD_REVERT_NOTE = (
-    "  note: this is a cloud-stored preference — the server may revert it on the next sync. "
-    "Change it in the Roborock app to make it stick. (See CAPABILITIES.md.)"
-)
-
-
 async def run_action(action, success_msg: str, duid: str | None, caveat: str | None = None):
     """Run a single fire-and-forget device action with a timeout + message."""
     async with device_session(duid) as (_device, props):
@@ -457,10 +475,33 @@ async def cmd_discover(duid: str | None, as_json: bool = False):
 
 
 # Empirically-decoded FAULT codes the library's B01Fault table lacks — decoded live from
-# the iOS app's human-readable pushes (see DP_DICTIONARY / DESIGN_NOTES s22). The FAULT DP is
+# the iOS app's human-readable pushes (see DP_DICTIONARY / PROTOCOL s22). The FAULT DP is
 # OVERLOADED: it also carries benign lifecycle/status codes, so "non-zero" ≠ fault.
 _FAULT_OVERRIDES = {8: "robot trapped — clear obstacles"}   # firmware reports trapped as 8 (lib: 513/514)
 _FAULT_BENIGN = {400}   # 400 = "starting scheduled cleanup" — a START code, not a fault
+
+
+def _shadow_staleness(last_update, now, threshold_s: int = STALE_AFTER_S):
+    """Age (seconds) of the daemon's last live frame + a warning banner if it's stale.
+
+    Pure (no I/O) → unit-testable. Returns (age_s|None, banner|None):
+      - last_update None  → age unknown, no warning. Reaching this with a populated status (the
+        only way cmd_status calls in) means a frame just arrived but the daemon's clock hasn't
+        ticked yet (a startup race) — warning there would be a false positive; real staleness
+        always carries a non-None old timestamp (below).
+      - age <= threshold  → fresh; (age, None).
+      - age >  threshold  → stale; (age, banner). The robot has likely gone offline/sleeping
+        (the daemon's shadow stopped refreshing). See test_status_stale.
+    Only meaningful for the daemon-served path; the standalone path fetches fresh each call.
+    """
+    if last_update is None:
+        return None, None
+    age = (now - last_update).total_seconds()
+    if age <= threshold_s:
+        return age, None
+    label = f"{int(age // 60)} min" if age >= 120 else f"{int(age)} s"
+    return age, (f"⚠ data is {label} old — the robot may be offline or sleeping "
+                 f"(the daemon's shadow has stopped refreshing).")
 
 
 async def cmd_status(duid: str | None, as_json: bool = False):
@@ -472,6 +513,13 @@ async def cmd_status(duid: str | None, as_json: bool = False):
             else:
                 print("Could not reach the robot (offline or sleeping).")
             return
+        # Daemon-served path only: the held shadow keeps its last values after the robot goes
+        # offline, so age the daemon's last live frame and warn when stale. Read AFTER
+        # fetch_status so an online refresh's fresh frame counts. None getter ⇒ standalone
+        # (always fresh) ⇒ no check. (Reliability fix — PROTOCOL 2026-06-19.)
+        stale_age, stale_banner = None, None
+        if _INJECTED_LAST_UPDATE is not None:
+            stale_age, stale_banner = _shadow_staleness(_INJECTED_LAST_UPDATE(), datetime.now())
         fault_label = None
         if s.fault and s.fault not in _FAULT_BENIGN:
             if s.fault in _FAULT_OVERRIDES:
@@ -494,8 +542,12 @@ async def cmd_status(duid: str | None, as_json: bool = False):
                 "back_type": _enum_name(back), "clean_time_s": s.clean_time,
                 "clean_area_m2": s.clean_area, "progress_pct": s.cleaning_progress,
                 "fault": fault_label, "fault_code": s.fault,
+                "data_age_s": round(stale_age, 1) if stale_age is not None else None,
+                "stale": stale_banner is not None, "warning": stale_banner,
             }))
         else:
+            if stale_banner:
+                print(stale_banner)
             emoji = STATE_EMOJI.get(s.status.name if s.status else "", "")
             print(f"{emoji} State      : {_enum_name(s.status)}")
             print(f"   Battery   : {s.battery if s.battery is not None else '—'}%")
@@ -511,7 +563,7 @@ async def cmd_status(duid: str | None, as_json: bool = False):
             if s.clean_area:
                 # clean_area is *swept* area in m² (distance-swept × lane-width, incl.
                 # overlap + passes), not floor footprint — confirmed by cross-checking
-                # the decoded map path. See DP_DICTIONARY.md / DESIGN_NOTES.md.
+                # the decoded map path. See DP_DICTIONARY.md / PROTOCOL.md.
                 print(f"   Area swept: {s.clean_area} m²")
             if fault_label:
                 print(f"   Fault     : {fault_label} ({s.fault})")
@@ -613,6 +665,11 @@ async def cmd_consumables(duid: str | None, as_json: bool = False):
 # field-6/t1 monotonicity later confirmed across 22 records, s26): 2=dur_min, 5=area×1000,
 # 8=mode, 9=route, 10=pass, 11=ok are solid; 7=water (vacuum→0; 4=possible "custom" level);
 # 3≈0.55×dur; 6=monotonic accumulator (NOT a clean attribute → not surfaced).
+# s30 op:notify timing reconfirmed 2=dur_min = ACTIVE-cleaning minutes (= floor(active dwell)); on an
+# aborted/relocating clean it reads well below wall-clock (expected, not a bug). 5=area×1000 is order-of-
+# magnitude confirmed (home-floor ceiling); the exact ÷1000 constant awaits one app-area cross-check.
+# (A 2026-06-19 "2≠duration / area÷100" claim was retracted — it timed wall-clock on aborted cleans;
+# see reconcile-0/CONSOLIDATION_LOG.md.)
 _CR_WATER = {0: "off", 1: "low", 2: "medium", 3: "high", 4: "custom"}
 _CR_MODE  = {1: "vac_and_mop", 2: "vacuum", 3: "mop", 4: "customized"}
 _CR_ROUTE = {0: "fast", 1: "daily", 2: "fine"}
@@ -704,11 +761,10 @@ def cmd_history_from_capture(path: str, as_json: bool = False):
 
 
 async def cmd_history(duid: str | None, as_json: bool = False, timeout: int = 15):
-    # The op:list REQUEST is app/push-only — a vac.py op:list send gets no reply (DESIGN_NOTES
-    # s22–s24). The 12-field parser IS validated (18-record corpus). For the back-catalog
-    # offline, use `--from-capture` on a watch/echo capture taken while the app shows History.
-    print("NOTE: live `history` (op:list pull) is not working yet — the robot pushes the list to the"
-          " app, not to a vac.py request. Use `./vac.py history --from-capture <watch.jsonl>`. (ROADMAP #13)")
+    # Live op:list pull WORKS (s30, live-validated: 25 records). The request wraps in COMMON(101)
+    # with the STRING code key — `{"101":{"52":{"op":"list"}}}` (see trigger() below) — and the reply
+    # lands on our own /m/o/{client-id}, which the library already subscribes to. The s22–s24/s29
+    # "no reply" was the enum-member inner key, NOT a blocked topic. `--from-capture` stays for offline decode.
 
     records: list[dict] = []
     seen: set[str] = set()
@@ -737,7 +793,13 @@ async def cmd_history(duid: str | None, as_json: bool = False, timeout: int = 15
                     if got.is_set():
                         return
                     try:
-                        await props.command.send(B01_Q10_DP.CLEAN_RECORD, {"op": "list"})
+                        # s30: COMMON(101) envelope with a STRING code key — matches the app's wire form
+                        # `{"101":{"52":{"op":"list"}}}` (MITM capture). The s29 attempts used the enum-member
+                        # key, which likely serialized to the wrong inner key → no reply. The reply lands on our
+                        # OWN /m/o/{username} topic, which the library already subscribes to → retest should work
+                        # with no runtime MITM. (PROTOCOL s30.)
+                        await props.command.send(
+                            B01_Q10_DP.COMMON, {str(B01_Q10_DP.CLEAN_RECORD.code): {"op": "list"}})
                     except Exception:
                         pass
                     await asyncio.sleep(4)
@@ -768,7 +830,7 @@ async def cmd_watch(duid: str | None, out_path: str | None, interval: int):
     flowing even if the device goes quiet (e.g. when it pauses or docks).
     """
     # Raw values are logged (clean_area undivided) so the capture is faithful for
-    # later analysis — see ROADMAP.md re: unit verification.
+    # later analysis — see CAPABILITIES.md re: unit verification.
     cols = ["time", "elapsed_s", "state", "battery", "fan", "water", "mode",
             "clean_time_s", "clean_area_raw", "progress_pct", "eta_min",
             "batt_to_finish", "fault"]
@@ -1057,7 +1119,7 @@ async def cmd_map(duid: str | None, timeout: int = 30, out_prefix: str = "map"):
     rooms_out = f"{out_prefix}_rooms.png"
     if best["path"]:
         pts, _ = dm.parse_path(best["path"])
-        pts = dm._drop_path_outlier(pts)   # strip the spurious leading sentinel (green-dot bug) — parity with decode_map.py; band-aid, OPEN QUESTION per DESIGN_NOTES s24
+        pts = dm._drop_path_outlier(pts)   # strip the spurious leading sentinel (green-dot bug) — parity with decode_map.py; band-aid, OPEN QUESTION per PROTOCOL s24
         if pts:
             with open(path_out, "w") as f:
                 f.write(dm.render_path_svg(pts))
@@ -1137,11 +1199,17 @@ async def cmd_rooms(duid: str | None):
 
 
 async def cmd_clean_rooms(room_args: list[str], duid: str | None):
-    """Start a room-selective clean via a one-time REST /jobs POST (ROADMAP #8).
+    """Start a room-selective clean.
 
-    Posts a one-time schedule ~2 min from now so the robot starts in ~2 min.
-    Use --dry-run to validate the POST end-to-end without moving the robot
-    (posts the job, confirms it appears in list, then deletes it before it fires).
+    Default: a one-time REST /jobs POST (CAPABILITIES #8) — schedules a one-time job ~2 min out, so
+    the robot starts in ~2 min. This REST path also backs persistent schedules (#852).
+    --mqtt instead fires an INSTANT MQTT segment-clean (#851): START_CLEAN (DP 201)
+    {"cmd": 2, "clean_paramters": [ids]} — no Hawk, starts immediately, but carries no per-job
+    params (fan/water/mode/route/count): the segment clean uses the ROOM's saved per-room config —
+    global `vac.py mode/fan/water` do NOT apply (verified 2026-06-19). For per-job params drop --mqtt
+    (REST bakes mode/route/count; note water didn't take via either path — see CAPABILITIES).
+    Use --dry-run to validate without moving the robot (REST: posts a DISABLED job, confirms it
+    lists, then deletes it; --mqtt: just prints the payload).
     """
     import struct as _struct
     from datetime import datetime, timedelta
@@ -1159,6 +1227,9 @@ async def cmd_clean_rooms(room_args: list[str], duid: str | None):
     dry_run   = "--dry-run" in room_args
     if dry_run:
         room_args.remove("--dry-run")
+    mqtt      = "--mqtt" in room_args
+    if mqtt:
+        room_args.remove("--mqtt")
     fan_s   = _pop("--fan")
     water_s = _pop("--water")
     mode_s  = _pop("--mode")
@@ -1169,10 +1240,11 @@ async def cmd_clean_rooms(room_args: list[str], duid: str | None):
     water_code = _resolve_enum(YXWaterLevel, water_s, "water level").code if water_s else 2
     mode_code  = _resolve_enum(YXCleanType,  mode_s,  "mode").code if mode_s else 1
     route_code  = _resolve_enum(YXCleanLine, route_s, "route").code if route_s else YXCleanLine.FAST.code
-    clean_count = int(count_s) if count_s else 1
+    clean_count = _coerce_int(count_s, "--count") if count_s else 1
 
     if not room_args:
-        sys.exit("Usage: ./vac.py clean-rooms <name|id>...  [options]  (see ./vac.py rooms)")
+        sys.exit("Usage: ./vac.py clean-rooms <name|id>...  [--mqtt] "
+                 "[--fan/--water/--mode/--route/--count] [--dry-run]  (see ./vac.py rooms)")
 
     creds = require_creds()
 
@@ -1219,9 +1291,35 @@ async def cmd_clean_rooms(room_args: list[str], duid: str | None):
     ids = sorted(set(ids))
     labels = ", ".join(rooms_map.get(i, str(i)).replace("rr_", "") for i in ids)
 
+    # Phase 2a: MQTT instant segment-clean (#851) — opt-in via --mqtt.
+    # The firmware accepts ONLY the misspelled key `clean_paramters` as a BARE LIST
+    # (PROTOCOL s28; corroborated by openHAB's merged Q10 code). Instant + no Hawk, but it
+    # carries no per-job params — fan/water/mode/route/count are ignored here; pre-set them
+    # (vac.py mode/fan/water) or drop --mqtt for the REST /jobs path (which also covers schedules).
+    if mqtt:
+        ignored = [f for f, v in (("--fan", fan_s), ("--water", water_s), ("--mode", mode_s),
+                                  ("--route", route_s), ("--count", count_s)) if v]
+        if ignored:
+            print(f"Note: {', '.join(ignored)} ignored under --mqtt (instant clean uses the "
+                  f"robot's current settings). Pre-set with vac.py mode/fan/water, or drop "
+                  f"--mqtt for a REST job that carries them.")
+        payload = {"cmd": 2, "clean_paramters": ids}
+        if dry_run:
+            print(f"✓ Dry-run (--mqtt): would send START_CLEAN (DP 201) {payload}  ·  rooms: {labels}")
+            return
+        await run_action(
+            lambda p: p.command.send(B01_Q10_DP.START_CLEAN, payload),
+            f"✓ MQTT room-clean started (instant): {labels}",
+            _duid,
+        )
+        return
+
     # Phase 2: REST /jobs POST (outside MQTT session)
     jobs_path = f"/user/devices/{_duid}/jobs"
     existing = await _schedule_request("GET", jobs_path, creds) or []
+    # Tidy up our own past one-time jobs, which flip to disabled-but-undeleted after firing and
+    # otherwise accumulate as ✗ clutter in `schedule list`. Best-effort; skipped on --dry-run. (CAPABILITIES)
+    purged = 0 if dry_run else await _purge_spent_onetime_jobs(existing, jobs_path, creds)
     map_id = next(
         (j["param"]["mapId"] for j in existing if (j.get("param") or {}).get("mapId")),
         None,
@@ -1237,7 +1335,7 @@ async def cmd_clean_rooms(room_args: list[str], duid: str | None):
 
     # One-time cron a couple minutes out. A --dry-run posts the job DISABLED so it can
     # NEVER fire regardless of delete success/timing (the scheduler skips enabled:false
-    # jobs) — this kills the delete-vs-fire race at the source (DESIGN_NOTES s18/s19), so a
+    # jobs) — this kills the delete-vs-fire race at the source (PROTOCOL s18/s19), so a
     # real clean can use a short, prompt lead instead of a wide 5-min safety window.
     lead = 2
     fire = datetime.now() + timedelta(minutes=lead)
@@ -1275,8 +1373,9 @@ async def cmd_clean_rooms(room_args: list[str], duid: str | None):
         return
 
     job_info = f" (job {job_id})" if job_id else ""
+    purged_note = f"  ·  tidied {purged} spent one-time job{'s' if purged != 1 else ''}" if purged else ""
     print(f"✓ Room clean scheduled{job_info}: {labels}  →  fires in ~{lead} min  "
-          f"[fan={fan_code} water={water_code} mode={mode_code} route={route_code}]")
+          f"[fan={fan_code} water={water_code} mode={mode_code} route={route_code}]{purged_note}")
 
 
 # ── schedule REST API ────────────────────────────────────────────────────────
@@ -1303,9 +1402,35 @@ async def _schedule_request(method: str, path: str, creds: "Creds", body=None):
     return data.get("result")
 
 
+def _spent_onetime_jobs(jobs: list[dict]) -> list[dict]:
+    """Pick the one-time clean jobs that have already fired and now linger as disabled clutter.
+
+    Pure (no I/O) → unit-testable. A one-time job is POSTed `enabled:True` and flips to
+    `enabled:False` once it fires, so `repeated == False and enabled == False` ⇒ spent. Repeating
+    schedules and still-pending one-time jobs (`enabled:True`) are never matched — the defaults
+    (`repeated`→True, `enabled`→True when a key is absent) keep it conservative. See test_spent_jobs."""
+    return [j for j in jobs
+            if not j.get("repeated", True) and not j.get("enabled", True) and j.get("id")]
+
+
+async def _purge_spent_onetime_jobs(jobs: list[dict], jobs_path: str, creds: "Creds") -> int:
+    """Best-effort delete of spent one-time jobs (see _spent_onetime_jobs). Returns the count
+    removed; a DELETE failure never aborts the caller's clean (cleanup is opportunistic)."""
+    n = 0
+    for j in _spent_onetime_jobs(jobs):
+        try:
+            await _schedule_request("DELETE", f"{jobs_path}/{j['id']}", creds)
+            n += 1
+        except SystemExit as e:           # _schedule_request calls sys.exit() on API error
+            print(f"[purge] DELETE job {j.get('id')} failed (API error): {e}", file=sys.stderr)
+        except Exception as e:            # network / aiohttp errors
+            print(f"[purge] DELETE job {j.get('id')} failed: {type(e).__name__}: {e}", file=sys.stderr)
+    return n
+
+
 def _cron_string(time_str: str, days: str | None, once: bool) -> str:
     """Build a 5-field cron expression (MM HH DOM MON DOW) from CLI flags."""
-    h, m = map(int, time_str.split(":"))
+    h, m = _hhmm_arg(time_str, "--time")
     if once:
         from datetime import date, timedelta, datetime as _dt
         now = _dt.now()
@@ -1394,14 +1519,14 @@ async def cmd_schedule(sub: str, rest: list[str], duid: str | None, as_json: boo
     if sub == "add":
         if "--time" not in rest:
             sys.exit("Usage: ./vac.py schedule add --time HH:MM [options]  (see --help)")
-        time_str  = rest[rest.index("--time")  + 1]
-        days      = rest[rest.index("--days")  + 1] if "--days"   in rest else None
+        time_str  = _str_arg(rest, "--time")   # presence already guarded above
+        days      = _str_arg(rest, "--days")
         once      = "--once" in rest
-        fan_s     = rest[rest.index("--fan")   + 1] if "--fan"    in rest else None
-        water_s   = rest[rest.index("--water") + 1] if "--water"  in rest else None
-        mode_s    = rest[rest.index("--mode")  + 1] if "--mode"   in rest else None
-        route_s   = rest[rest.index("--route") + 1] if "--route"  in rest else None
-        passes_s  = rest[rest.index("--passes")+ 1] if "--passes" in rest else None
+        fan_s     = _str_arg(rest, "--fan")
+        water_s   = _str_arg(rest, "--water")
+        mode_s    = _str_arg(rest, "--mode")
+        route_s   = _str_arg(rest, "--route")
+        passes_s  = _str_arg(rest, "--passes")
         room_args: list[str] = []
         if "--rooms" in rest:
             i = rest.index("--rooms") + 1
@@ -1412,7 +1537,7 @@ async def cmd_schedule(sub: str, rest: list[str], duid: str | None, as_json: boo
         water_code = _resolve_enum(YXWaterLevel, water_s, "water level").code if water_s else 2
         mode_code  = _resolve_enum(YXCleanType,  mode_s,  "mode").code if mode_s else 1
         route_code  = _resolve_enum(YXCleanLine, route_s, "route").code if route_s else YXCleanLine.FAST.code
-        passes     = int(passes_s) if passes_s else 1
+        passes     = _coerce_int(passes_s, "--passes") if passes_s else 1
         cron       = _cron_string(time_str, days, once)
 
         # Phase 1: device session — only to get duid and optionally capture the
@@ -1528,26 +1653,77 @@ async def cmd_find(duid):
     await run_action(lambda p: p.command.send(B01_Q10_DP.SEEK, {}), "Locate signal sent.", duid)
 
 
-# Manual remote drive → the library's RemoteTrait (props.remote). Maps the CLI verb to the
-# zero-arg trait method; `exit` → `exit_remote`. The trait sends COMMON{REMOTE: action} over MQTT.
-_DRIVE_ACTIONS = {"forward": "forward", "left": "left", "right": "right",
-                  "stop": "stop", "exit": "exit_remote"}
+# Manual remote drive → string-key COMMON{"<REMOTE code>": value} (the app's wire-form, validated
+# live 2026-06-19: device State flips to `remote_control_active` and the robot moves). The library
+# RemoteTrait (props.remote) sends the WRONG inner key — the enum member, not str(code) — and is
+# INERT on this robot: the same wrong-wire bug as the s30 settings overturn. So we build the envelope
+# ourselves via _common_set. Values are RemoteCommand: forward=0, left=2, right=3, stop=4 (= enter
+# remote-control mode), exit=5.
+_DRIVE_CODES = {"forward": 0, "left": 2, "right": 3, "stop": 4, "exit": 5}
 
 
 async def cmd_drive(action: str, duid):
-    """Manual remote-control drive (B01 `RemoteTrait`). INCREMENTAL — each call is one discrete
-    step (the library methods take no distance/duration arg). `forward`/`left`/`right` move;
-    `stop` halts the last move (and is how you enter remote-control mode); `exit` leaves remote
-    control. ⚠️ MOVES THE ROBOT — use in a clear space. Nothing in telemetry confirms it (B01 has
-    no heading DP, and the 301 path streams only during a clean), so watch the robot. Tested live
-    (s27): the robot IGNORES CLI REMOTE writes (no motion, never STATUS=7) while the app drives fine
-    — it's app-only on this firmware, riding the blocked input topic. Kept as an honestly-labelled RE
-    artifact. See CAPABILITIES.md (Manual drive)."""
-    method = _DRIVE_ACTIONS.get(action.lower()) if action else None
-    if method is None:
+    """Manual remote-control drive (B01). INCREMENTAL — each call is one discrete step (no
+    distance/duration arg). `forward`/`left`/`right` move; `stop` enters remote-control mode (and
+    halts the last move); `exit` leaves it. ⚠️ MOVES THE ROBOT — use a clear space and WATCH it.
+    Validated live 2026-06-19 via string-key COMMON{"12":<code>}: the device State flips to
+    `remote_control_active` and the robot drives. (The library RemoteTrait's enum-member key is inert
+    — the same wrong-wire bug as the s30 settings overturn — so cmd_drive builds the envelope itself.)
+    No heading DP and the 301 path streams only during a clean, so motion itself isn't in telemetry.
+    Unsupervised drive can strand localization (→ physical power-cycle to recover), so drive only while
+    watching. See CAPABILITIES.md (Manual drive)."""
+    code = _DRIVE_CODES.get(action.lower()) if action else None
+    if code is None:
         sys.exit("Usage: ./vac.py drive <forward|left|right|stop|exit>  (moves the robot — use a clear space)")
-    msg = f"drive: {action.lower()} sent — NB: CLI drive is app-only/inert on this fw (see CAPABILITIES.md)."
-    await run_action(lambda p: getattr(p.remote, method)(), msg, duid)
+    msg = f"drive: {action.lower()} sent (string-key COMMON REMOTE) — ⚠️ MOVES the robot; watch it (strand risk)."
+    await run_action(_common_set(B01_Q10_DP.REMOTE, code), msg, duid)
+
+
+def _coerce_int(value: str, flag: str) -> int:
+    """Coerce a single string value to int, exiting cleanly (not a bare traceback) on junk.
+    Used when the raw string has already been extracted by _str_arg or similar."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        sys.exit(f"{flag} must be a whole number (e.g. 1 or 2)")
+
+
+def _hhmm_arg(value: str, flag: str) -> tuple[int, int]:
+    """Coerce an HH:MM CLI argument, exiting cleanly (not a bare traceback) on junk."""
+    try:
+        h, m = (int(x) for x in value.split(":"))
+    except (TypeError, ValueError):
+        sys.exit(f"{flag} must be HH:MM (24-hour), e.g. 22:00")
+    if not (0 <= h < 24 and 0 <= m < 60):
+        sys.exit(f"{flag} must be a valid 24-hour HH:MM, e.g. 22:00")
+    return h, m
+
+
+def _int_arg(rest: list[str], flag: str, default: int, *, minimum: int = 1) -> int:
+    """Parse an integer-valued CLI flag (e.g. `--timeout 30`), exiting cleanly (not a bare
+    traceback) on a missing value, non-integer, or one below `minimum`. Returns `default` if absent."""
+    if flag not in rest:
+        return default
+    i = rest.index(flag)
+    raw = rest[i + 1] if i + 1 < len(rest) else None
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        sys.exit(f"{flag} needs an integer, e.g. {flag} {default}")
+    if n < minimum:
+        sys.exit(f"{flag} must be ≥ {minimum}")
+    return n
+
+
+def _str_arg(rest: list[str], flag: str, default=None) -> str | None:
+    """Parse a string-valued CLI flag (e.g. `--out file.jsonl`), exiting cleanly (not a bare
+    traceback) if the flag is present but has no following value. Returns `default` if absent."""
+    if flag not in rest:
+        return default
+    i = rest.index(flag)
+    if i + 1 >= len(rest):
+        sys.exit(f"{flag} requires a value (e.g. {flag} <value>)")
+    return rest[i + 1]
 
 
 def _resolve_enum(enum_cls, value: str, label: str):
@@ -1595,22 +1771,65 @@ async def cmd_mode(mode: str, duid):
     await run_action(lambda p: p.vacuum.set_clean_mode(m), f"Mode set to {m.name.lower()}.", duid)
 
 
+# Time-window wire form, ground-truthed from the s30 app-wire capture (live_test_s30/decoded.jsonl). A
+# 6-byte base64 blob [flag, startHour, startMinute, endHour, endMinute, trail], flag 0xfc=on / 0x00=off.
+# SHARED by two features the app drives under string-key COMMON:
+#  • DND       DP 33  NOT_DISTURB_DATA          (trail always 0x00; e.g. "/BYACAAA"=22:00–08:00 on)
+#  • Off-peak  DP 106/107 VALLEY_POINT_CHARGING_DATA[_UP]  (trail 0x00/0x01 — meaning unknown; DP 105 is its on/off
+#       switch, mirroring DND's DP 25). Decoded live 2026-06-19; the "25:00" capture samples are transient picker mid-edits.
+# DND also has DP 92 NOT_DISTURB_EXPAND (sub-flags object) + DP 25 NOT_DISTURB (bool enable), set via `raw --common`.
+# Codec round-trips the captured samples byte-identically (test_dnd_window). See PROTOCOL 2026-06-19 / DP_DICTIONARY.
+def _encode_time_window(on: bool, sh: int, sm: int, eh: int, em: int) -> str:
+    return base64.b64encode(bytes([0xfc if on else 0x00, sh, sm, eh, em, 0])).decode()
+
+
+def _decode_time_window(b64: str) -> dict:
+    """Decode a time-window blob (DND DP 33 / off-peak DP 106-107) → {on, start 'HH:MM', end 'HH:MM'}
+    (or {} on a malformed blob). Reads bytes 0–4; the optional 6th 'trail' byte is ignored here."""
+    try:
+        b = base64.b64decode(b64)
+    except Exception:
+        return {}
+    if len(b) < 5:
+        return {}
+    return {"on": b[0] != 0, "start": f"{b[1]:02d}:{b[2]:02d}", "end": f"{b[3]:02d}:{b[4]:02d}"}
+
+
+# DP names whose value is a time-window blob `read` should render human-readably (see _decode_time_window).
+_WINDOW_DPS = {"NOT_DISTURB_DATA", "VALLEY_POINT_CHARGING_DATA", "VALLEY_POINT_CHARGING_DATA_UP"}
+
+
 async def cmd_dnd(state: str, start: str | None, end: str | None, duid):
-    if state == "off":
-        await run_action(
-            lambda p: p.command.send(B01_Q10_DP.NOT_DISTURB, 0),
-            "Do Not Disturb disabled.", duid,
-        )
-        return
-    if state != "on":
+    if state not in ("on", "off"):
         sys.exit("Usage: ./vac.py dnd <on|off> [--start HH:MM] [--end HH:MM]")
-    sh, sm = map(int, (start or "22:00").split(":"))
-    eh, em = map(int, (end or "08:00").split(":"))
-    payload = {"enable": 1, "startHour": sh, "startMinute": sm, "endHour": eh, "endMinute": em}
-    await run_action(
-        lambda p: p.command.send(B01_Q10_DP.NOT_DISTURB_DATA, payload),
-        f"DND enabled: {sh:02d}:{sm:02d}–{eh:02d}:{em:02d}", duid,
-    )
+    if state == "off":
+        # Master enable off (DP 25, boolean) under string-key COMMON — the app's wire form.
+        await run_action(_common_set(B01_Q10_DP.NOT_DISTURB, False), "Do Not Disturb disabled.", duid)
+        return
+    # on: set the schedule window (DP 33 blob) only when a time is given (else keep the existing
+    # window), then flip the master enable (DP 25). Both via string-key COMMON, sent separately —
+    # the only COMMON form the capture proves (single inner key per message).
+    set_enable = _common_set(B01_Q10_DP.NOT_DISTURB, True)
+    if start or end:
+        sh, sm = _hhmm_arg(start or "22:00", "--start")
+        eh, em = _hhmm_arg(end or "08:00", "--end")
+        set_window = _common_set(B01_Q10_DP.NOT_DISTURB_DATA, _encode_time_window(True, sh, sm, eh, em))
+
+        async def _action(p):
+            await set_window(p)
+            await set_enable(p)
+        msg = f"DND enabled: {sh:02d}:{sm:02d}–{eh:02d}:{em:02d}"
+    else:
+        _action, msg = set_enable, "Do Not Disturb enabled."
+    await run_action(_action, msg, duid)
+
+
+def _common_set(dp, value):
+    """Write a B01 stored-pref via the COMMON(101) envelope with the STRING code key —
+    `{"101":{"<code>":value}}`, the exact form the app uses. s30: this makes these settings STICK;
+    the old direct `command.send(DP, value)` was ignored (wrong wire shape) → they only LOOKED
+    cloud-authoritative (s18). See PROTOCOL s30 CLI-retest."""
+    return lambda p: p.command.send(B01_Q10_DP.COMMON, {str(dp.code): value})
 
 
 async def cmd_volume(level: str, duid):
@@ -1621,8 +1840,8 @@ async def cmd_volume(level: str, duid):
     except ValueError:
         sys.exit("Usage: ./vac.py volume <0-100>")
     await run_action(
-        lambda p: p.command.send(B01_Q10_DP.VOLUME, v),
-        f"Volume set to {v}.", duid, caveat=CLOUD_REVERT_NOTE,
+        _common_set(B01_Q10_DP.VOLUME, v),
+        f"Volume set to {v}.", duid,
     )
 
 
@@ -1631,8 +1850,8 @@ async def cmd_child_lock(state: str, duid):
         sys.exit("Usage: ./vac.py child-lock <on|off>")
     val = 1 if state == "on" else 0
     await run_action(
-        lambda p: p.command.send(B01_Q10_DP.CHILD_LOCK, val),
-        f"Child lock {'enabled' if val else 'disabled'}.", duid, caveat=CLOUD_REVERT_NOTE,
+        _common_set(B01_Q10_DP.CHILD_LOCK, val),
+        f"Child lock {'enabled' if val else 'disabled'}.", duid,
     )
 
 
@@ -1641,9 +1860,258 @@ async def cmd_boost(state: str, duid):
         sys.exit("Usage: ./vac.py boost <on|off>")
     val = 1 if state == "on" else 0
     await run_action(
-        lambda p: p.command.send(B01_Q10_DP.AUTO_BOOST, val),
-        f"Auto-boost {'enabled' if val else 'disabled'}.", duid, caveat=CLOUD_REVERT_NOTE,
+        _common_set(B01_Q10_DP.AUTO_BOOST, val),
+        f"Auto-boost {'enabled' if val else 'disabled'}.", duid,
     )
+
+
+async def _read_dp_value(duid: str | None, dp_name: str, timeout: int = 12):
+    """Publish REQUEST_DPS and return the value of the named DP once it arrives (else None).
+    Read-only — used by `zone list` etc. to read the robot's current state DPs."""
+    from roborock.devices.rpc.b01_q10_channel import stream_decoded_responses
+    box: dict = {}
+    got = asyncio.Event()
+    async with device_session(duid) as (_device, props):
+        async def collect():
+            async for dps in stream_decoded_responses(props._channel):
+                for k, v in dps.items():
+                    if (getattr(k, "name", None) or str(k)) == dp_name:
+                        box["v"] = v
+                        got.set()
+                        return
+
+        async def trigger():
+            try:
+                for _ in range(3):
+                    if got.is_set():
+                        return
+                    try:
+                        await props.refresh()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(3)
+            except asyncio.CancelledError:
+                pass
+
+        ct = asyncio.create_task(collect())
+        tt = asyncio.create_task(trigger())
+        try:
+            await asyncio.wait_for(got.wait(), timeout=timeout)
+        except (asyncio.TimeoutError, KeyboardInterrupt):
+            pass
+        finally:
+            ct.cancel()
+            tt.cancel()
+    return box.get("v")
+
+
+async def cmd_zone(rest: list[str], duid: str | None):
+    """Restricted zones — no-go / no-mop / threshold — via DP 54 (string-key COMMON). Map edits ONLY,
+    no robot motion. Coords are robot units (~5 mm/unit; ~200 ≈ 1 m), the same frame as the map/path.
+      ./vac.py zone list
+      ./vac.py zone add <no-go|no-mop|threshold> <x1> <y1> <x2> <y2>
+      ./vac.py zone clear
+    DP 54 SET replaces the whole zone list, so `add` reads the current zones first and re-sends them + the new one.
+    (Virtual walls are a separate DP 56 — not handled here.)"""
+    from decode_map import (parse_all_restricted_zones, encode_restricted_zones,
+                            RZONE_TYPES, RZONE_NAMES)
+    sub = (rest[0] if rest else "list").lower()
+    args = rest[1:]
+
+    async def _current():
+        val = await _read_dp_value(duid, "RESTRICTED_ZONE_UP")
+        return parse_all_restricted_zones(val) if val else []
+
+    if sub == "list":
+        zones = await _current()
+        if not zones:
+            print("No restricted zones set.")
+            return
+        for zt, pts in zones:
+            print(f"  {RZONE_TYPES.get(zt, f'type{zt}')}: " + " ".join(f"({x},{y})" for x, y in pts))
+        return
+
+    if sub == "clear":
+        await run_action(_common_set(B01_Q10_DP.RESTRICTED_ZONE, encode_restricted_zones([])),
+                        "All restricted zones cleared (re-add with `zone add`).", duid)
+        return
+
+    if sub == "add":
+        if len(args) != 5 or args[0].lower() not in RZONE_NAMES:
+            sys.exit("Usage: ./vac.py zone add <no-go|no-mop|threshold> <x1> <y1> <x2> <y2>  (robot units, ~5 mm)")
+        zt = RZONE_NAMES[args[0].lower()]
+        x1, y1, x2, y2 = (_coerce_int(a, "coord") for a in args[1:])
+        rect = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        zones = await _current()
+        zones.append((zt, rect))
+        await run_action(_common_set(B01_Q10_DP.RESTRICTED_ZONE, encode_restricted_zones(zones)),
+                        f"Added {args[0].lower()} zone — {len(zones)} total. Verify with `zone list`.", duid)
+        return
+
+    sys.exit("Usage: ./vac.py zone <list | add <type> x1 y1 x2 y2 | clear>")
+
+
+async def cmd_wall(rest: list[str], duid: str | None):
+    """Virtual walls — straight no-cross barriers — via DP 56 (string-key COMMON). Map edits ONLY,
+    no robot motion. Coords are robot units (~5 mm/unit; ~200 ≈ 1 m), the same frame as the map/path.
+      ./vac.py wall list
+      ./vac.py wall add <x1> <y1> <x2> <y2>
+      ./vac.py wall clear
+    DP 56 SET replaces the whole wall list, so `add` reads the current walls first and re-sends them + the new one.
+    (Restricted zones — no-go / no-mop / threshold — are the separate `zone` command, DP 54.)"""
+    from decode_map import parse_virtual_walls, encode_virtual_walls
+    sub = (rest[0] if rest else "list").lower()
+    args = rest[1:]
+
+    # parse_virtual_walls returns [((y1,x1),(y2,x2)), …] in the robot's STORED (y,x) order; the CLI
+    # speaks path-frame (x,y) like `zone`, so we swap at the boundary (read: y,x→x,y; write: x,y→y,x).
+    async def _current():
+        val = await _read_dp_value(duid, "VIRTUAL_WALL_UP")
+        return parse_virtual_walls(val) if val else []
+
+    if sub == "list":
+        walls = await _current()
+        if not walls:
+            print("No virtual walls set.")
+            return
+        for (y1, x1), (y2, x2) in walls:
+            print(f"  wall: ({x1},{y1}) → ({x2},{y2})")
+        return
+
+    if sub == "clear":
+        await run_action(_common_set(B01_Q10_DP.VIRTUAL_WALL, encode_virtual_walls([])),
+                         "All virtual walls cleared (re-add with `wall add`).", duid)
+        return
+
+    if sub == "add":
+        if len(args) != 4:
+            sys.exit("Usage: ./vac.py wall add <x1> <y1> <x2> <y2>  (robot units, ~5 mm)")
+        x1, y1, x2, y2 = (_coerce_int(a, "coord") for a in args)
+        walls = await _current()
+        walls.append(((y1, x1), (y2, x2)))   # store (y,x) to match parse_virtual_walls / the robot
+        await run_action(_common_set(B01_Q10_DP.VIRTUAL_WALL, encode_virtual_walls(walls)),
+                         f"Added wall — {len(walls)} total. Verify with `wall list`.", duid)
+        return
+
+    sys.exit("Usage: ./vac.py wall <list | add x1 y1 x2 y2 | clear>")
+
+
+async def _common_op_pull(props, dp, request, match, *, timeout=15, tries=3, interval=4):
+    """Send COMMON(101){str(dp.code): request} up to `tries` times and return the first reply value
+    v for which match(v) is truthy, else None. The reply lands on our OWN /m/o/{client-id} (which the
+    library already subscribes to); the STRING-code COMMON envelope is the s30 fix that made these
+    op:list/op:select pulls actually reply (the s22–s29 enum-member key serialized wrong → no reply).
+    Shared by cmd_multimap + cmd_history_record; cmd_history keeps its own (already live-validated) loop."""
+    box: dict = {}
+    got = asyncio.Event()
+
+    async def collect():
+        async for dps in stream_decoded_responses(props._channel):
+            v = dps.get(dp)
+            if v is not None and match(v):
+                box["v"] = v
+                got.set()
+                return
+
+    async def trigger():
+        try:
+            for _ in range(tries):
+                if got.is_set():
+                    return
+                try:
+                    await props.command.send(B01_Q10_DP.COMMON, {str(dp.code): request})
+                except Exception:
+                    pass
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            pass
+
+    ct = asyncio.create_task(collect())
+    tt = asyncio.create_task(trigger())
+    try:
+        await asyncio.wait_for(got.wait(), timeout=timeout)
+    except (asyncio.TimeoutError, KeyboardInterrupt):
+        pass
+    finally:
+        ct.cancel()
+        tt.cancel()
+    return box.get("v")
+
+
+async def cmd_multimap(rest: list[str], duid: str | None, as_json: bool = False, timeout: int = 15):
+    """List saved maps (multi-floor) — DP 61 op:list, READ-ONLY. Selecting/switching a map is
+    deliberately NOT exposed: it's motionless but re-localizes the robot (disorienting while parked),
+    and the saved-map set is rarely edited. Reply arrives on our own /m/o/ (string-key COMMON, s30)."""
+    sub = (rest[0] if rest else "list").lower()
+    if sub != "list":
+        sys.exit("Usage: ./vac.py multimap list   (select/switch intentionally omitted — see docs)")
+    async with device_session(duid) as (device, props):
+        print(f"Fetching maps from {device.name}…")
+        mm = await _common_op_pull(
+            props, B01_Q10_DP.MULTI_MAP, {"op": "list"},
+            lambda v: isinstance(v, dict) and v.get("op") == "list" and isinstance(v.get("data"), list),
+            timeout=timeout)
+    if not mm:
+        print("No map list received.")
+        return
+    data = mm.get("data", [])
+    if as_json:
+        print(json.dumps(data, indent=2, default=str))
+        return
+    if not data:
+        print("No saved maps.")
+        return
+    for m in data:
+        if isinstance(m, dict):
+            extra = f"  (ts {m['timestamp']})" if "timestamp" in m else ""
+            print(f"  [{m.get('id')}] {m.get('name', '?')}{extra}")
+        else:
+            print(f"  {m}")
+
+
+async def cmd_history_record(record_id: str, duid: str | None, as_json: bool = False, timeout: int = 15):
+    """Fetch one clean record's detail via DP 52 op:select (record ids come from `vac.py history`).
+    ⚠ RE-SCAFFOLD: s30 saw op:select return an ACK only (`{op:select, result:1}`). The per-clean fields
+    are ALREADY in the op:list record string (decoded by `vac.py history`); op:select has shown no extra
+    data. A richer route/coverage 'detail' arriving as a protocol-301 frame is an untested hypothesis
+    (301 is only confirmed for PATH replay, not record detail)."""
+    async with device_session(duid) as (device, props):
+        print(f"Requesting record {record_id} from {device.name}…")
+        rec = await _common_op_pull(
+            props, B01_Q10_DP.CLEAN_RECORD, {"op": "select", "id": record_id},
+            lambda v: isinstance(v, dict) and v.get("op") == "select",
+            timeout=timeout)
+    if rec is None:
+        print("No op:select reply on the dps stream (op:select normally returns just an ACK; the id "
+              "may be stale). The record-id string itself already decodes via `vac.py history`.")
+        return
+    print(json.dumps(rec, indent=2, default=str))
+
+
+async def cmd_read(dp_name: str, duid: str | None, as_json: bool = False):
+    """Read one DP's CURRENT value (publishes REQUEST_DPS + refresh, returns the named DP). Read-only —
+    the round-trip primitive for settings validation (read baseline → set → re-read → restore). DP names
+    are `B01_Q10_DP` members (e.g. VOLUME, DUST_SETTING, RESTRICTED_ZONE_UP). Prints `(no value received)`
+    if the DP isn't in the device's REQUEST_DPS harvest."""
+    try:
+        B01_Q10_DP[dp_name.upper()]
+    except KeyError:
+        available = "\n  ".join(d.name for d in B01_Q10_DP)
+        sys.exit(f"Unknown DP '{dp_name}'. Available:\n  {available}")
+    val = await _read_dp_value(duid, dp_name.upper())
+    if as_json:
+        print(json.dumps({dp_name.upper(): val}, default=str))
+    elif val is not None:
+        # Render the shared DND/off-peak time-window blobs (DP 33 / 106 / 107) human-readably.
+        if dp_name.upper() in _WINDOW_DPS and isinstance(val, str):
+            w = _decode_time_window(val)
+            if w:
+                state = "on" if w["on"] else "off"
+                print(f"{dp_name.upper()} = {val!r}  →  {w['start']}–{w['end']} ({state})")
+                return
+        print(f"{dp_name.upper()} = {val!r}")
+    else:
+        print(f"{dp_name.upper()}: (no value received — not in the REQUEST_DPS harvest, or timed out)")
 
 
 async def cmd_raw(dp_name: str, value_json: str | None, duid: str | None, common: bool = False):
@@ -1653,10 +2121,12 @@ async def cmd_raw(dp_name: str, value_json: str | None, duid: str | None, common
         available = "\n  ".join(d.name for d in B01_Q10_DP)
         sys.exit(f"Unknown DP '{dp_name}'. Available:\n  {available}")
     value = json.loads(value_json) if value_json else {}
-    # --common: wrap as COMMON{<DP>: value} — the path the library uses for REMOTE (the robot's
-    # command/input channel) — vs a bare command.send(<DP>, value). RE probe for whether wrapping
-    # lands a write that the bare send doesn't (settings / START_BACK / walls). See CAPABILITIES write-path.
-    target, payload = (B01_Q10_DP.COMMON, {dp: value}) if common else (dp, value)
+    # --common: wrap as COMMON(101){ "<dp-code>": value } — the dpCommon envelope upstream #846 uses for
+    # B01 settings writes (button_light/child_lock/DND): inner key is a STRING code (`str(code)`), NOT the
+    # enum member. This envelope is CONFIRMED: volume/child-lock/boost/DND/drive/zone/wall all stick via
+    # string-key COMMON (s30 live-validated); bare command.send uses the enum-member key which is silently
+    # ignored. See CAPABILITIES write-path + PROTOCOL s30.
+    target, payload = (B01_Q10_DP.COMMON, {str(dp.code): value}) if common else (dp, value)
     async with device_session(duid) as (_device, props):
         try:
             result = await asyncio.wait_for(props.command.send(target, payload), timeout=ACTION_TIMEOUT)
@@ -1690,11 +2160,18 @@ async def _run_one(cmd, rest, duid, as_json):
     if cmd == "status":            await (cmd_status_quick if "--quick" in rest else cmd_status)(duid, as_json)
     elif cmd == "discover":        await cmd_discover(duid, as_json)
     elif cmd == "consumables":     await cmd_consumables(duid, as_json)
-    elif cmd == "history":         await cmd_history(duid, as_json)
+    elif cmd == "history":
+        if "--record" in rest:
+            i = rest.index("--record")
+            rid = rest[i + 1] if i + 1 < len(rest) else None
+            if not rid: sys.exit("Usage: ./vac.py history --record <id> [--json]")
+            await cmd_history_record(rid, duid, as_json)
+        else:
+            await cmd_history(duid, as_json)
     elif cmd == "rooms":           await cmd_rooms(duid)
     elif cmd == "map":
-        timeout = int(rest[rest.index("--timeout") + 1]) if "--timeout" in rest else 30
-        out_prefix = rest[rest.index("--out") + 1] if "--out" in rest else "map"
+        timeout = _int_arg(rest, "--timeout", 30)
+        out_prefix = _str_arg(rest, "--out", "map")
         await cmd_map(duid, timeout, out_prefix)
     elif cmd in _SIMPLE_CMDS:
         await {"start": cmd_start, "stop": cmd_stop, "pause": cmd_pause,
@@ -1723,12 +2200,21 @@ async def _run_one(cmd, rest, duid, as_json):
         await cmd_boost(rest[0], duid)
     elif cmd == "dnd":
         if not rest: sys.exit("Usage: ./vac.py dnd <on|off> [--start HH:MM] [--end HH:MM]")
-        start = rest[rest.index("--start") + 1] if "--start" in rest else None
-        end = rest[rest.index("--end") + 1] if "--end" in rest else None
+        start = _str_arg(rest, "--start")
+        end = _str_arg(rest, "--end")
         await cmd_dnd(rest[0], start, end, duid)
     elif cmd == "clean-rooms":
         if not rest: sys.exit("Usage: ./vac.py clean-rooms <name|id>... [--dry-run] ...")
         await cmd_clean_rooms(rest, duid)
+    elif cmd == "zone":
+        await cmd_zone(rest, duid)
+    elif cmd == "wall":
+        await cmd_wall(rest, duid)
+    elif cmd == "multimap":
+        await cmd_multimap(rest, duid, as_json)
+    elif cmd == "read":
+        if not rest: sys.exit("Usage: ./vac.py read <DP_NAME>")
+        await cmd_read(rest[0], duid, as_json)
     elif cmd == "raw":
         if not rest: sys.exit("Usage: ./vac.py raw [--common] <DP_NAME> [json_value]")
         common = "--common" in rest
@@ -1789,7 +2275,7 @@ class Daemon:
 
     # — connection lifecycle —
     async def connect(self):
-        global _INJECTED_SESSION
+        global _INJECTED_SESSION, _INJECTED_LAST_UPDATE
         creds = require_creds()
         ud = UserData.from_dict(creds.user_data)
         params = UserParams(username=creds.email, user_data=ud, base_url=creds.base_url)
@@ -1801,6 +2287,10 @@ class Daemon:
         if self.props is None:
             raise RuntimeError(f"'{self.device.name}' is not a B01/Q10 device")
         _INJECTED_SESSION = (self.device, self.props)
+        # Expose this daemon's live-frame clock to cmd_status (read lazily so it reflects
+        # frames that arrive during the call). Survives reconnect — last_update is a daemon
+        # attribute, not tied to the rebuilt props. See _shadow_staleness.
+        _INJECTED_LAST_UPDATE = lambda: self.last_update
         self.unauthorized = False
 
     def _context(self) -> dict:
@@ -1941,7 +2431,7 @@ class Daemon:
     async def _supervisor(self):
         """After a 135 throttle, cool down (ESCALATING) then try one reconnect with existing
         creds. Give up after _MAX_RECONNECTS — retrying revoked creds forever is just noise to
-        the server; require a manual `login`. Resets on success. (server-view, DESIGN_NOTES s21)"""
+        the server; require a manual `login`. Resets on success. (server-view, PROTOCOL s21)"""
         while not self._stop.is_set():
             await asyncio.sleep(15)
             if not self.unauthorized or self.needs_login:
@@ -1958,6 +2448,14 @@ class Daemon:
                 self.reconnect_attempts = 0       # connect() also clears self.unauthorized
                 _log("reconnect succeeded; cloud session restored")
             except Exception as exc:
+                if not _counts_toward_reauth_giveup(exc):
+                    # Local/transport outage — creds are fine, the network is just down. Keep retrying
+                    # with backoff; do NOT march toward `needs_login` (a false "re-login" prompt).
+                    # (ext-review 2026-06-18; #14.)
+                    self._diagnose("reconnect (network — not counted toward give-up)", exc)
+                    _log(f"reconnect failed (network/transport, not a cloud refusal) — will retry; "
+                         f"held at {self.reconnect_attempts}/{_MAX_RECONNECTS} toward re-auth give-up.")
+                    continue
                 self.reconnect_attempts += 1
                 self._diagnose(f"reconnect#{self.reconnect_attempts}/{_MAX_RECONNECTS}", exc)
                 if self.reconnect_attempts >= _MAX_RECONNECTS:
@@ -2441,13 +2939,19 @@ def _local_main(cmd, rest, duid, as_json):
     }
     if cmd == "status" and "--quick" in rest:
         run_ro(lambda: cmd_status_quick(duid, as_json))
+    elif cmd == "history" and "--record" in rest:
+        i = rest.index("--record")
+        rid = rest[i + 1] if i + 1 < len(rest) else None
+        if not rid:
+            sys.exit("Usage: ./vac.py history --record <id> [--json]")
+        run_ro(lambda: cmd_history_record(rid, duid, as_json))
     elif cmd in json_cmds:
         # all read-only (discover/status/consumables/history) → safe to backoff-retry
         run_ro(lambda: json_cmds[cmd](duid, as_json))
     elif cmd in simple_cmds:
         run(simple_cmds[cmd](duid))
     elif cmd == "login":
-        email = rest[rest.index("--email") + 1] if "--email" in rest else None
+        email = _str_arg(rest, "--email")
         if not email:
             sys.exit("Usage: ./vac.py login --email your@email.com")
         run(cmd_login(email))
@@ -2482,12 +2986,12 @@ def _local_main(cmd, rest, duid, as_json):
     elif cmd == "dnd":
         if not rest:
             sys.exit("Usage: ./vac.py dnd <on|off> [--start HH:MM] [--end HH:MM]")
-        start = rest[rest.index("--start") + 1] if "--start" in rest else None
-        end = rest[rest.index("--end") + 1] if "--end" in rest else None
+        start = _str_arg(rest, "--start")
+        end = _str_arg(rest, "--end")
         run(cmd_dnd(rest[0], start, end, duid))
     elif cmd == "watch":
-        out = rest[rest.index("--out") + 1] if "--out" in rest else None
-        interval = int(rest[rest.index("--interval") + 1]) if "--interval" in rest else 10
+        out = _str_arg(rest, "--out")
+        interval = _int_arg(rest, "--interval", 10)
         if "--bytes" in rest:
             target = cmd_watch_bytes
         elif "--raw" in rest:
@@ -2499,8 +3003,8 @@ def _local_main(cmd, rest, duid, as_json):
         except KeyboardInterrupt:
             pass
     elif cmd == "map":
-        timeout = int(rest[rest.index("--timeout") + 1]) if "--timeout" in rest else 30
-        out_prefix = rest[rest.index("--out") + 1] if "--out" in rest else "map"
+        timeout = _int_arg(rest, "--timeout", 30)
+        out_prefix = _str_arg(rest, "--out", "map")
         try:
             run_ro(lambda: cmd_map(duid, timeout, out_prefix))
         except KeyboardInterrupt:
@@ -2511,6 +3015,16 @@ def _local_main(cmd, rest, duid, as_json):
         if not rest:
             sys.exit("Usage: ./vac.py clean-rooms <name|id>... [--dry-run] [--fan F] [--water W] ...")
         run(cmd_clean_rooms(rest, duid))
+    elif cmd == "zone":
+        run(cmd_zone(rest, duid))
+    elif cmd == "wall":
+        run(cmd_wall(rest, duid))
+    elif cmd == "multimap":
+        run_ro(lambda: cmd_multimap(rest, duid, as_json))
+    elif cmd == "read":
+        if not rest:
+            sys.exit("Usage: ./vac.py read <DP_NAME>")
+        run_ro(lambda: cmd_read(rest[0], duid, as_json))
     elif cmd == "raw":
         if not rest:
             sys.exit("Usage: ./vac.py raw [--common] <DP_NAME> [json_value]")

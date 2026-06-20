@@ -1,7 +1,7 @@
 # Anatomy of the Q10 map stream — protocol 301
 
-> **As of:** 2026-06-16 · Q10 S5+ (`roborock.vacuum.ss07`, B01) · firmware 03.11.24 · decoded from the
-> live "build a new map" capture of session **s26** (map `<map-id>`; real room names redacted).
+> **As of:** 2026-06-19 · Q10 S5+ (`roborock.vacuum.ss07`, B01) · firmware 03.11.24 · decoded from the
+> live "build a new map" capture (map `<map-id>`; real room names redacted).
 > Unofficial, reverse-engineered. Confidence per row: ✅ confirmed · 🟡 inferred · ⬜ unknown.
 
 *This is a drill-down. The protocol-reference hub — with the confidence key and the method — is [PROTOCOL.md](PROTOCOL.md).*
@@ -22,7 +22,8 @@ That output topic carries two protocols:
 - **protocol 102** — JSON data-point updates (status, settings, …).
 - **protocol 301** — spontaneous **binary MAP frames**, with two sub-types keyed by the first two bytes:
   - **`0101`** = room / occupancy **grid** (streams even while docked),
-  - **`0201`** = cleaning **path** (streams only during an active run).
+  - **`0201`** = cleaning **path** (streams during a clean or active navigation),
+  - **`0301`** / **`0401`** = additional per-map layers, observed but **undecoded** (low priority; full frames not yet captured).
 
 At a glance, the two sub-types are laid out like this (byte offsets above each field; not to scale —
 the authoritative per-field detail is in the two tables further down):
@@ -52,6 +53,23 @@ which is why the first two panels are unlabeled.
 
 ## How to decode it (the concrete steps)
 
+**Shortcut — parse it with Kaitai.** [`frames.ksy`](frames.ksy) is a [Kaitai Struct](https://kaitai.io) spec for the
+raw 301 frame (both `0101` and `0201`). Compile it and parse your own `vac.py watch --bytes` captures without
+hand-writing the offsets:
+
+```bash
+kaitai-struct-compiler -t python frames.ksy # → roborock_b01_301.py
+```
+```python
+from roborock_b01_301 import RoborockB01301
+f = RoborockB01301.from_bytes(raw_301_payload) # one payload from `vac.py watch --bytes`
+# 0101 grid frame:
+print(f.body.width, f.body.height) # grid dims; LZ4 body in f.body.lz4_body
+```
+
+The LZ4 grid body is decompressed externally (`pixel // 4 = room_id`, 243 = outside, 249 = wall). The manual
+byte-by-byte walkthrough below is the same layout, spelled out.
+
 ### `0101` — room / occupancy grid
 
 1. Confirm bytes **0–1** = `01 01`.
@@ -75,7 +93,7 @@ which is why the first two panels are unlabeled.
 ### `0201` — cleaning path
 
 7. Confirm bytes **0–1** = `02 01`. `point_count` = BE u16 at bytes **8–9**.
-8. **Points** = BE **int16** `(x, y)` **mm** pairs starting at byte **16**, read to the end of the frame.
+8. **Points** = BE **int16** `(x, y)` **path-unit** pairs (≈2.5 mm/unit, not true mm) starting at byte **16**, read to the end of the frame.
    Read whole 4-byte pairs and **ignore a trailing remainder of ≤ 2 bytes**. ⚠️ The header `point_count`
    can read **one higher** than the pairs actually present (this frame: count = 407, but 406 pairs +
    2 spare bytes). **Do not shift the start offset to "fix" the count** — byte 16 is correct (its points
@@ -88,12 +106,12 @@ which is why the first two panels are unlabeled.
 
 ### Georeference — overlaying a path on a grid
 
-9. A path point `(x, y)` mm → grid cell: **`col = (y − oy) // res`, `row = (ox − x) // res`**, with
-   **`res = 20` mm/px** (note the 90° map: grid **col** comes from path **y**, grid **row** from path
+9. A path point `(x, y)` [path-units] → grid cell: **`col = (y − oy) // res`, `row = (ox − x) // res`**, with
+   **`res = 20` path-units/px (≈50 mm/px)** (note the 90° map: grid **col** comes from path **y**, grid **row** from path
    **x**, and the row axis is **inverted**). The origin `(ox, oy)` is **not** in the frame. Recover it by **auto-fit**: choose the `(ox, oy)` that lands the most path
    points on floor cells. For a multi-frame run, fit once on the largest frame and align the others by grid
    overlap — that is exactly what makes the three panels above share a single coordinate frame. *(Worked
-   example: on the s26 capture the fit recovered **`ox = 1001`, `oy = −3307` mm** — these are
+   example: on this capture the fit recovered **`ox = 1001`, `oy = −3307` (path-units)** — these are
    `decode_map.py`'s `GRID_ORIGIN_OX` / `GRID_ORIGIN_OY`; mind the sign, `oy` is **negative** in this
    `col = (y − oy)` convention — and it landed **99.87 %** of path points on floor cells. Those constants
    are **per install** — dock-anchored, stable until the dock moves or the map is reset — not universal;
@@ -106,9 +124,9 @@ which is why the first two panels are unlabeled.
 | 0–1 | `sub_type` = `0x0101` | u16 BE | ✅ | Grid-frame magic. Path frames use `0x0201`. |
 | 2–5 | `map_id` | u32 BE | ✅ | Per-map id. Constant for a given map ⇒ it identifies the map, not geometry. Redacted here as `<map-id>`. |
 | 6 | `map_segmented` flag | u8 | 🟡 | **`0` while the map is still building (unsegmented), `1` once it's finalized into rooms.** Verified `byte6==1 ⟺ rooms>0` on **89/89** frames of this build (it flips the instant the 3 room records appear). Earlier captures only ever saw *built* maps, so it looked like a constant `0x01`. |
-| 7–8 | `width` | u16 BE | ✅ | Grid width px. Verified `==` empirical row-stride on 424/424 frames (s25). *(Historical: reading these as **LE** at `bytes[8:10]` gave a spurious `478` — the same bytes mis-offset + mis-endianned, not a separate field; the correct read is BE at `[7:9]`/`[9:11]`.)* |
+| 7–8 | `width` | u16 BE | ✅ | Grid width px. Verified `==` empirical row-stride on 424/424 frames. *(Historical: reading these as **LE** at `bytes[8:10]` gave a spurious `478` — the same bytes mis-offset + mis-endianned, not a separate field; the correct read is BE at `[7:9]`/`[9:11]`.)* |
 | 9–10 | `height` | u16 BE | ✅ | Grid height px. |
-| 11–24 | header block | 14 B | 🟡 | **No bounding-box / origin is encoded here** (exhaustive search, s25). Observed sub-structure: `[11]=0x04` (steady state; `0x00`/`0x02` in the first few tiny build frames) · `[12–13]=0x6901` per-map · `[14] ≈ 10×height` · `[15]=0` · `[16]=0x05` const · `[17]` session/mode flag · `[18–21]` per-frame scan-progress counter · `[22]` per-frame · `[23–24]=0`. |
+| 11–24 | header block | 14 B | 🟡 | **No bounding-box / origin is encoded here** (exhaustive search). Observed sub-structure: `[11]=0x04` (steady state; `0x00`/`0x02` in the first few tiny build frames) · `[12–13]=0x6901` per-map · `[14] ≈ 10×height` · `[15]=0` · `[16]=0x05` const · `[17]` session/mode flag · `[18–21]` per-frame scan-progress counter · `[22]` per-frame · `[23–24]=0`. |
 | 25–26 | `declared_size` | u16 BE | ✅ | Decompressed size = `width × height` + trailing room records. |
 | 27–28 | `compressed_size` | u16 BE | ✅ | LZ4 block length, bytes. |
 | 29 … | `lz4_block` | LZ4 block | ✅ | Decompresses to the occupancy grid + room records — see decode steps 4–6. |
@@ -123,7 +141,7 @@ which is why the first two panels are unlabeled.
 | 4–7 | unknown | 4 B | ⬜ | Four bytes. |
 | 8–9 | `point_count` | u16 BE | ✅ | Number of path points. ⚠️ may read **one higher** than the pairs actually present (see decode step 8). |
 | 10–15 | header tail | 6 B | ⬜ | Six bytes; completes the 16-byte header. |
-| 16 … | `points` | int16[] (x,y) | ✅ | BE int16 (x, y) mm pairs (read to end; ignore a ≤2-byte remainder; **don't** shift the offset — byte 16 georeferences ≈100 %; byte 14 → ~91 %, byte 18 also transposes). Last = robot position; first ≈ dock. 0x11+ firmware prepends a spurious `~(0, −1907)` sentinel (stripped; meaning unknown). |
+| 16 … | `points` | int16[] (x,y) | ✅ | BE int16 (x, y) **path-unit** pairs (≈2.5 mm/unit; read to end; ignore a ≤2-byte remainder; **don't** shift the offset — byte 16 georeferences ≈100 %; byte 14 → ~91 %, byte 18 also transposes). Last = robot position; first ≈ dock. 0x11+ firmware prepends a spurious `~(0, −1907)` sentinel (stripped; meaning unknown). |
 
 ## Open questions (visible in this very capture)
 

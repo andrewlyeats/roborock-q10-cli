@@ -32,7 +32,7 @@ below). Everything else we reuse, learn from, or build on — credited here.
   (marcelrv) — the protocol-documentation style (per-DP tables with uncertainty markers)
   our `DP_DICTIONARY.md` follows.
 - **`v1b3c0d3x3r/roborock-qseries-map-bridge`** — confirmed the Q-series map is
-  LZ4-compressed, which unblocked our `decode_map.py` grid decode (see `DESIGN_NOTES.md`).
+  LZ4-compressed, which unblocked our `decode_map.py` grid decode (see `FRAME_ANATOMY.md`).
 - **[dustcloud](https://github.com/dgiese/dustcloud)** (Dennis Giese) — foundational
   Roborock/Xiaomi RE that this whole ecosystem builds on.
 

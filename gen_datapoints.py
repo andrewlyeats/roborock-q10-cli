@@ -3,11 +3,11 @@
 enums, sourced from the python-roborock library (authoritative for NAMES, KEYS, and the YX*
 value-enum label sets) with a 'documented in DP_DICTIONARY.md' flag.
 
-ROADMAP #21(c). This is the additive, machine-consumable analog of frames.ksy (which indexes the
+CAPABILITIES #21(c). This is the additive, machine-consumable analog of frames.ksy (which indexes the
 frame headers): it lets a porter / status panel enumerate every DP name+key and the value-enum
 labels without scraping markdown. **DP_DICTIONARY.md stays the canonical reference** for the
 MEANINGS, confidence tiers, numeric codes, provenance, and open questions — deliberately NOT
-duplicated here (the prose provenance is the durable value; see DESIGN_NOTES 2026-06-17).
+duplicated here (the prose provenance is the durable value; see PROTOCOL 2026-06-17).
 
 Run (regenerate after a python-roborock upgrade, like check_roborock_api.py):
     /path/to/python gen_datapoints.py > datapoints.json

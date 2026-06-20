@@ -4,20 +4,25 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 ![status: unofficial](https://img.shields.io/badge/status-unofficial-orange.svg)
 
-Notes from reverse-engineering how the Roborock Q10 S5+ talks to Roborock's cloud — with a CLI
-(`vac.py`) as proof it works. The Q10 S5+ is a **"B01" device: cloud-only**, with no local-network
+Notes from reverse-engineering how the Roborock Q10 S5+ talks to Roborock's cloud, plus `vac.py` — a
+**validated reference implementation** of those findings (a single-connection daemon that dodges the account
+`135` rate-limit, live telemetry taps, map decode, structured `--json` output), not just a proof of concept.
+The Q10 S5+ is a **"B01" device: cloud-only**, with no local-network
 control path; every command is relayed through Roborock's MQTT broker (or its REST API).
 
 ## Quickstart
 
+**Requires Python 3.11+.** On 3.9/3.10, `pip` silently installs an old release with no Q10 support — check
+`python3 --version` first (details under [Setup](#setup)).
+
 ```bash
 git clone https://github.com/andrewlyeats/roborock-q10-cli.git && cd roborock-q10-cli
-pip install -r requirements.txt            # needs Python ≥3.11 — see the install gotcha under Setup
-./vac.py login --email you@example.com     # emails you a 6-digit code
-./vac.py discover                          # caches your device list
-./vac.py daemon start --careful            # holds ONE cloud connection (recommended — see "Be gentle" below)
-./vac.py status                            # battery, state, fan/water/mode, clean progress
-./vac.py map                               # render the floor plan -> map_rooms.png
+pip install -r requirements.txt # needs Python ≥3.11 — see the install gotcha under Setup
+./vac.py login --email you@example.com # emails you a 6-digit code
+./vac.py discover # caches your device list
+./vac.py daemon start --careful # holds ONE cloud connection (recommended — see "Be gentle" below)
+./vac.py status # battery, state, fan/water/mode, clean progress
+./vac.py map # render the floor plan -> map_rooms.png
 ```
 
 That's the whole happy path. The daemon holds a single connection so repeated commands can't trip the
@@ -42,7 +47,7 @@ map-finalized flag) — a few bytes, and where the map's origin lives, are still
 **Want a GUI?** The [Home Assistant Roborock integration][ha] probably already covers your vacuum — if
 that's all you need, use it. **Want a terminal / cron / scripting tool, or to understand and extend the
 B01 protocol?** That's what this is: the **Quickstart** above gets you to a rendered map in a few commands;
-the protocol-reference hub for extenders is **[PROTOCOL.md](PROTOCOL.md)** — with findings that look undocumented elsewhere, like the REST **Hawk body-signing** rule that gates every cloud write (see [the deep end](#understanding-the-protocol-the-deep-end) below).
+the protocol-reference hub for extenders is **[PROTOCOL.md](PROTOCOL.md)** — with findings not publicly documented to our knowledge, like the REST **Hawk body-signing** rule that gates every cloud write (see [the deep end](#understanding-the-protocol-the-deep-end) below).
 
 ## ⚠️ Disclaimer
 
@@ -81,8 +86,8 @@ Needs Python **≥3.11** and the deps in `requirements.txt` (python-roborock, lz
 First-time auth (one time):
 
 ```bash
-./vac.py login --email you@example.com   # emails you a 6-digit code
-./vac.py discover                        # fetches + caches your device list
+./vac.py login --email you@example.com # emails you a 6-digit code
+./vac.py discover # fetches + caches your device list
 ```
 
 `login` saves a token to `~/.roborock_vac.json` (gitignored; schema in
@@ -98,20 +103,21 @@ First-time auth (one time):
 A small background daemon holds **one** persistent cloud connection and serves every command over a
 local socket, so commands don't each reconnect (and can't trip `135`). When one is running it's the
 default path; if it isn't, commands print how to start it. It's **validated live** — one held
-connection served reads, taps, and an hour of cleans without reconnecting. (Mechanics — escalating
-backoff, the `--careful` halt-file, automatic `135` recovery status — are in
-[DESIGN_NOTES.md](DESIGN_NOTES.md).)
+connection served reads, taps, and an hour of cleans without reconnecting. (The `135` rate-limit a single held connection
+sidesteps — and why that's the safe design — is in [PROTOCOL.md](PROTOCOL.md#transport); per-flag
+mechanics like `--careful` are in `./vac.py daemon --help`.)
 
 ```bash
-./vac.py daemon start --careful   # recommended: holds one connection, stops on the first 135/auth complaint
-./vac.py daemon status            # device, health, last update, taps
+./vac.py daemon start --careful # recommended: holds one connection, stops on the first 135/auth complaint
+./vac.py daemon status # device, health, last update, taps
 ./vac.py daemon stop
-./vac.py daemon restart           # e.g. after `pip install -U python-roborock`
-./vac.py status --force           # run ONE command standalone (own session; avoid repeating)
+./vac.py daemon restart # e.g. after `pip install -U python-roborock`
+./vac.py status --force # run ONE command standalone (own session; avoid repeating)
 ```
 
-**Headless (Linux/systemd):** a conservative [`roborock-vac.service`](roborock-vac.service) is included
-for running the daemon under `systemd --user`. It's **fail-stop** — it runs `--careful` and **never
+**Headless (Linux/systemd) — experimental:** a conservative [`roborock-vac.service`](roborock-vac.service)
+is included for running the daemon under `systemd --user`. *(Provided as-is: the daemon and its exit codes
+are tested, but the unit itself hasn't been run under a live `systemd` here.)* It's **fail-stop** — it runs `--careful` and **never
 auto-restarts on a rate-limit/auth exit** (better to stop than risk the `135` ban); only an unexpected
 crash restarts, capped at 3×/hour. `daemon run` exits with distinct codes (75 rate-limit · 77 re-login
 needed · 69 unreachable) so a unit or monitor can react. Edit the path, drop it in
@@ -120,9 +126,9 @@ needed · 69 unreachable) so a unit or monitor can react. Edit the path, drop it
 **Telemetry taps** (the daemon sees the whole stream, so capture lives there — opt-in, off by default):
 
 ```bash
-./vac.py daemon record --events ev.jsonl    # every decoded data-point
-./vac.py daemon record --novel new.jsonl    # first-seen DP names (catch new behaviors)
-./vac.py daemon record --bytes raw.jsonl     # raw frames (incl. binary/map)
+./vac.py daemon record --events ev.jsonl # every decoded data-point
+./vac.py daemon record --novel new.jsonl # first-seen DP names (catch new behaviors)
+./vac.py daemon record --bytes raw.jsonl # raw frames (incl. binary/map)
 ./vac.py daemon record --off
 ```
 
@@ -131,20 +137,26 @@ needed · 69 unreachable) so a unit or monitor can react. Edit the path, drop it
 Everyday commands:
 
 ```bash
-./vac.py status        # battery, state, fan, water, mode, clean time/area  (+--json)
-./vac.py status --quick  # fast status via REST device-shadow — no MQTT/daemon (legacy v1 dps; +--json)
+./vac.py status # battery, state, fan, water, mode, clean time/area (+--json)
+./vac.py status --quick # fast status via REST device-shadow — no MQTT/daemon (legacy v1 dps; +--json)
 ./vac.py start | pause | resume | stop | dock | dock-empty | find
-./vac.py rooms                       # list rooms on the current map (id + name)
-./vac.py clean-rooms kitchen study   # clean only those rooms (full cycle; +--fan/--water/--route/--count)
+./vac.py rooms # list rooms on the current map (id + name)
+./vac.py clean-rooms kitchen study # clean only those rooms — REST job, ~2 min (+--fan/--water/--route/--count)
+./vac.py clean-rooms kitchen --mqtt # instant MQTT segment-clean (each room uses its saved settings)
 
-./vac.py fan turbo               # quiet | balanced | turbo | max | max_plus
-./vac.py water high              # off | low | medium | high
-./vac.py mode vac_and_mop        # vac_and_mop | vacuum | mop
-./vac.py consumables             # brush/filter/sensor life counters  (+--json)
-./vac.py dnd on --start 22:00 --end 08:00   # also: dnd off
+./vac.py fan turbo # quiet | balanced | turbo | max | max_plus
+./vac.py water high # off | low | medium | high
+./vac.py mode vac_and_mop # vac_and_mop | vacuum | mop
+./vac.py consumables # brush/filter/sensor life counters (+--json)
+./vac.py dnd on --start 22:00 --end 08:00 # also: dnd off
+
+# Map edits (no robot motion — string-key COMMON write surface):
+./vac.py zone list | add <no-go|no-mop|threshold> x1 y1 x2 y2 | clear # no-go/no-mop zones (DP 54) ✅
+./vac.py wall list | add x1 y1 x2 y2 | clear # virtual walls (DP 56) ✅
+./vac.py multimap list # list saved maps (read-only)
 
 # Cloud schedules (stored server-side via the REST API):
-./vac.py schedule list                                       # id · time · rooms · fan/water
+./vac.py schedule list # id · time · rooms · fan/water
 ./vac.py schedule add --time 09:00 --days mon,wed,fri --rooms kitchen study
 ./vac.py schedule enable|disable|delete <id>
 ```
@@ -152,59 +164,47 @@ Everyday commands:
 Capture & decode (the reverse-engineering surface):
 
 ```bash
-./vac.py watch                           # live table of the modeled status fields  (--out clean.csv for CSV)
-./vac.py watch --raw --out clean.jsonl   # EVERY decoded data-point, one JSON object per line
-./vac.py map                             # floor plan -> map_rooms.png (grid renders anytime; +map_path.svg only during a clean)
-./vac.py watch --bytes --out cap.jsonl && ./decode_map.py cap.jsonl   # low-level: byte capture -> offline decode
-./decode_map.py cap.jsonl --json         # structured data (rooms, robot position + current room, path, georef) -> stdout, pipe to jq
-./vac.py history --from-capture clean.jsonl   # decode the per-clean back-catalog from a capture
-./vac.py raw STATUS                       # send any raw B01 data-point (run `raw BADNAME` to list them)
-./vac.py raw --common <DP> '<json>'       # wrap as COMMON{DP:val} (robot input channel) vs a bare send — write-path probe
-./vac.py drive forward                    # manual remote drive (forward|left|right|stop|exit) — ⚠️ built but app-only/inert on this fw (see CAPABILITIES)
+./vac.py watch # live table of the modeled status fields (--out clean.csv for CSV)
+./vac.py watch --raw --out clean.jsonl # EVERY decoded data-point, one JSON object per line
+./vac.py map # floor plan -> map_rooms.png (grid renders anytime; +map_path.svg only during a clean)
+./vac.py watch --bytes --out cap.jsonl && ./decode_map.py cap.jsonl # low-level: byte capture -> offline decode
+./decode_map.py cap.jsonl --json # structured data (rooms, robot position + current room, path, georef) -> stdout, pipe to jq
+./vac.py history # fetch + decode the per-clean back-catalog live (op:list, ~25 records)
+./vac.py history --from-capture clean.jsonl # ...or decode it offline from a capture
+./vac.py raw STATUS # send any raw B01 data-point (run `raw BADNAME` to list them)
+./vac.py raw --common <DP> '<json>' # wrap as COMMON{DP:val} (robot input channel) vs a bare send — write-path probe
+./vac.py drive forward # manual remote drive (forward|left|right|stop|exit) — ✅ validated live (moves the robot; drive in a clear space)
 ```
 
 Multiple robots? Add `--device <duid>` (DUIDs via `./vac.py discover`). Most B01 commands are
 fire-and-forget (no response body); `raw` is the escape hatch for features without a dedicated command.
 
-## Files
-
-| Path | Purpose |
-|---|---|
-| `vac.py` | The CLI |
-| `decode_map.py` | Decode the live map/path (incl. grid georeference) from a `watch --bytes` capture |
-| `check_roborock_api.py` | Canary: verify the `python-roborock` internals this tool relies on are still present (run after upgrades) |
-| `clean.csv` | Example `watch --out` output (one mopping run; benign telemetry, no PII) |
-| [PROTOCOL.md](PROTOCOL.md) | The protocol-reference hub — start here to understand or extend the protocol |
-| [FRAME_ANATOMY.md](FRAME_ANATOMY.md) | Byte-by-byte walkthrough of the map-frame (protocol-301) decode |
-| `frames.ksy` | Machine-readable Kaitai schema for the map-frame headers (drop a capture into the Kaitai Web IDE) |
-| `datapoints.json` | Machine-readable index of all 114 B01 data-points + value enums (regenerate with `gen_datapoints.py`; meanings live in DP_DICTIONARY.md) |
-| `pyproject.toml` | PEP 621 packaging — `pip install .` (enforces Python ≥3.11) installs a `vac` command |
-| [CAPABILITIES.md](CAPABILITIES.md) | Every interaction, scoped: can / can't / unknown |
-| [DP_DICTIONARY.md](DP_DICTIONARY.md) | What each data-point means + decoded formats |
-| [DESIGN_NOTES.md](DESIGN_NOTES.md) | Why it works this way + the reverse-engineering findings |
-| [ROADMAP.md](ROADMAP.md) | What works, what's planned, known limitations |
-| `credentials.example.json` | Schema of the login file `login` writes to `~/.roborock_vac.json` |
-| `~/.roborock_vac.json` · `~/.roborock_vac_cache.pkl` | Login token · cached home-data (gitignored) |
-
 ## Known limitations
 
 - **Cloud-only.** No local control for this model (B01 protocol).
 - **Map.** `vac.py map` renders the room grid (colour-coded, room-name-labeled). The grid streams
-  even while docked; the cleaning path + live position only stream *during* a clean. Georeference:
+  even while docked; the cleaning path + live position stream during a clean (and other active navigation). Georeference:
   grid dimensions come from the frame header, and the path↔grid origin (not transmitted in the stream)
   is auto-fit per capture → `map_overlay.png`. Obstacles are cloud-only (not in this data) — the
   library exposes none of this natively.
-- **Room cleaning** (`clean-rooms`) issues a one-time REST `/jobs` clean for the named rooms;
-  `--dry-run` posts a *disabled* job, confirms it, then deletes it (disabled so it can't fire even if the delete races). A complete cycle (undock → clean → dock → charging) is
-  validated live. The job fires **~2 min later** (scheduled, not instant). See [DESIGN_NOTES.md](DESIGN_NOTES.md).
-- **Structured map mutations are read-only** — virtual walls, no-go/no-mop zones, room
-  split/merge/rename decode but can't be set from here.
-- **Some settings are cloud-authoritative** (volume / child-lock / boost / DND) — writes may revert;
-  change those in the app. Runtime settings (fan/water/mode) persist.
+- **Room cleaning** (`clean-rooms`) has two paths. **`--mqtt`** runs an **instant** MQTT segment-clean
+  (no Hawk; each room cleans with its *saved* fan/water/mode) — the direct way to clean specific rooms now.
+  The default posts a one-time REST `/jobs` job that fires **~2 min later**, but it carries per-job
+  `--fan`/`--water`/`--route`/`--count` and is the path the app uses for *scheduled* cleans; `--dry-run`
+  posts a *disabled* job (can't fire even if the delete races). A complete cycle (undock → clean → dock →
+  charging) is validated live. The `/jobs` body schema is in [PROTOCOL.md](PROTOCOL.md).
+- **Virtual walls (DP 56) and no-go/no-mop zones (DP 54) can be set** — `wall`/`zone` add/clear, validated
+  live (wall-SET round-trip 2026-06-19; zone-SET). Room split/merge/rename decode but aren't settable yet.
+- **Most stored settings are settable** (volume, child-lock, boost, DND, dust, route, carpet) via the
+  string-key COMMON envelope — an earlier interpretation saw writes revert; that was a wire-format bug. A couple
+  (`BREAKPOINT_CLEAN`, `MAP_SAVE_SWITCH`) don't stick. Runtime settings (fan/water/mode) persist.
 - **Consumables** show hours used + % remaining (confirmed against the app: main 300 h / side 200 h /
   filter 150 h).
 
 ## Understanding the protocol (the deep end)
+
+*How this was done: the cloud write surface was cracked not by intercepting the network but by running the
+Roborock app in an Android emulator and watching its own traffic.*
 
 For the protocol itself, the reference hub is **[PROTOCOL.md](PROTOCOL.md)** — transport · auth/Hawk ·
 data points · map frames · capabilities, every claim tagged with a confidence tier + firmware/session
@@ -219,27 +219,27 @@ The highlights:
   and the path↔grid registration auto-fit per map (the origin isn't transmitted in the stream).
   *(Not a sole source: python-roborock [PR #848] is converging on a similar auto-fit solve — read this
   as an independent, dated corroboration, with the provenance write-up as the durable part.)*
-  → [FRAME_ANATOMY.md](FRAME_ANATOMY.md), [DESIGN_NOTES.md](DESIGN_NOTES.md), [`decode_map.py`](decode_map.py)
-- **The cloud write path** — room-clean and schedule writes go through a REST `/jobs` call that needs
+  → [FRAME_ANATOMY.md](FRAME_ANATOMY.md), [PROTOCOL.md](PROTOCOL.md), [`decode_map.py`](decode_map.py)
+- **The cloud write path** — schedule writes (and one-time `/jobs` room cleans) go through a REST `/jobs` call that needs
   **Hawk *body* signing**; getting that wrong looks exactly like "writes don't work / token scope,"
-  but it isn't. This one appears to be **genuinely undocumented elsewhere** (filed upstream as
-  [issue #849], unmerged). → [DESIGN_NOTES.md](DESIGN_NOTES.md)
+  but it isn't. This one appears to be **not publicly documented, to our knowledge** (filed upstream as
+  [issue #849], unmerged). → [PROTOCOL.md](PROTOCOL.md)
 - **A single-connection daemon** — one held MQTT connection serving every command, to stay under the
   account-level `135` rate-limit that otherwise locks out the CLI *and* the app. *(As upstream gains
   held-connection / MQTT segment-clean paths, the practical edge narrows; the documented 135-avoidance
-  **design + the "why"** is the lasting bit.)* → [DESIGN_NOTES.md](DESIGN_NOTES.md)
+  **design + the "why"** is the lasting bit.)* → [PROTOCOL.md](PROTOCOL.md#transport)
 - **The B01 data-point dictionary** — what each data-point means and how its payload decodes (114 in
   the library catalog; **~66** ever seen across all sessions; ~19 surfaced in `status`). → [DP_DICTIONARY.md](DP_DICTIONARY.md)
 
 **How this relates to upstream.** Basic Q10 control/status/sensors are already in `python-roborock` +
 Home Assistant core, and map/georef/wall-zone decode is **actively converging in open python-roborock
-PRs** ([#847], [#848], [#850], [#851]). So treat the decode/map parts
-here as an *independent, dated second implementation*, not a unique capability. The least-duplicated,
-most durable contributions are the **confidence-tagged protocol reference** itself and the **Hawk
-`/jobs` body-signing** finding — the aim is to feed those upstream, not to compete on the CLI.
+PRs** ([#847], [#848], [#850], [#851]). The decode/map parts here overlap that work — a dated, independent
+take on the same ground. The parts least covered elsewhere are the **confidence-tagged protocol reference** and the
+**Hawk `/jobs` body-signing** finding; we've filed what we can upstream, and hope the reference is useful to anyone
+building on B01.
 
 What's been verified vs. still open is scoped in [CAPABILITIES.md](CAPABILITIES.md) (can / can't /
-unknown) and [ROADMAP.md](ROADMAP.md).
+unknown).
 
 ## Built on / related projects
 
@@ -256,7 +256,7 @@ An unofficial CLI + daemon built on others' work — full credits in [CREDITS.md
 
 Contributions — especially reports from other Roborock models — are welcome
 ([CONTRIBUTING.md](CONTRIBUTING.md)). Before testing against a live robot, read the **Be gentle with
-the cloud** note above and [DESIGN_NOTES.md](DESIGN_NOTES.md). Licensed under the [MIT License](LICENSE).
+the cloud** note above. Licensed under the [MIT License](LICENSE).
 
 ## Built with AI assistance
 

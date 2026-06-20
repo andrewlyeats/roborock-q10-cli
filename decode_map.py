@@ -43,7 +43,7 @@ Usage:
   ./decode_map.py cap.jsonl --dps raw.jsonl  # -> overlay includes walls + zones
   ./decode_map.py cap.jsonl --json           # -> structured data on stdout (no images; pipe to jq)
 
-The `--json` output is the "give others the data" surface (ROADMAP #21): grid dims +
+The `--json` output is the "give others the data" surface (CAPABILITIES #21): grid dims +
 georeference transform, rooms with pixel geometry, the robot's current position + room,
 the cleaning path, and any wall/zone overlay — so a status panel / web UI / HA shell
 command can consume the decode without parsing a PNG. Schema: `roborock-b01-map/1`.
@@ -57,7 +57,7 @@ import sys
 # varies by session / firmware / clean-mode (0x08 AND 0x11 both observed — s23 mop-mode
 # emitted 0201_0011_...); parse_path reads the point count from bytes 8-9 and is agnostic
 # to it. Matching the full 8-byte sig "0201000800020000" found ZERO path frames whenever
-# byte 3 differed (it silently dropped the entire s23 cleaning path). See DESIGN_NOTES s23.
+# byte 3 differed (it silently dropped the entire s23 cleaning path). See PROTOCOL s23.
 PATH_SIG = "0201"
 # Grid frames: match only the 2-byte sub-type PREFIX. Bytes 2-5 of the full 8-byte
 # header are a device-specific map id (e.g. <device-map-id> on the dev's robot) and differ per
@@ -72,7 +72,7 @@ GRID_PREFIX = "0101"
 # Score: 99.87 % of path points land on floor pixels at these values (6117/6125).
 GRID_ORIGIN_OX = 1001   # mm — path_x that maps to grid row 0 (top edge)
 GRID_ORIGIN_OY = -3307  # mm — path_y that maps to grid col 0 (left edge)
-GRID_MM_PER_PIXEL = 20  # mm per grid pixel (standard Roborock resolution)
+GRID_MM_PER_PIXEL = 20  # PATH-UNITS per grid pixel, NOT mm. path≈2.5 mm/unit → ≈50 mm/px (the standard Roborock resolution). The registration path//20=pixel is correct; only the "mm" label was wrong — see DP_DICTIONARY coord-frame note.
 
 # Room palette (room_id -> RGB). Stable, distinct, readable on white.
 ROOM_COLORS = [
@@ -122,7 +122,7 @@ def parse_path(raw):
     OPEN QUESTION for future RE (do NOT call this resolved): what TRIGGERS the bogus leading point?
     Leads — longer/multi-segment cleans (→ higher byte[3]), or map type (s23/s24/s26 were the
     multi-map-build window). Settle it with a targeted capture: short vs long/resumed clean, original
-    vs freshly-built map, and check whether the sentinel appears. See DESIGN_NOTES s28.
+    vs freshly-built map, and check whether the sentinel appears. See PROTOCOL s28.
     """
     count = struct.unpack(">H", raw[8:10])[0]
     body = raw[16:]
@@ -136,7 +136,7 @@ def _drop_path_outlier(pts):
     ~(0,-1900), counted in the frame's `count`; see parse_path). Drop pts[0] ONLY if its step to
     pts[1] is a gross outlier (>20x the median step), so a genuine first point (e.g. a dock point)
     is never dropped — robust and trigger-agnostic. NOT a firmware-version thing (byte[3] is a
-    per-clean counter). What TRIGGERS the sentinel is an OPEN QUESTION (see parse_path / DESIGN_NOTES
+    per-clean counter). What TRIGGERS the sentinel is an OPEN QUESTION (see parse_path / PROTOCOL
     s28). Surfaced as the green START dot landing outside the walls (user-caught, s24).
     """
     if len(pts) < 4:
@@ -224,7 +224,7 @@ def find_width(grid):
 
 def grid_dims_from_header(raw):
     """Grid (W, H) read straight from the 0101 frame header: raw[7:9]=W, raw[9:11]=H,
-    both BE u16. Verified 100% against find_width across 424 frames / 2 widths (DESIGN_NOTES
+    both BE u16. Verified 100% against find_width across 424 frames / 2 widths (PROTOCOL
     s25). Returns None if the bytes are missing or implausible, so callers fall back to
     find_width. This is what makes the decode size-agnostic on any home (the dimensions
     are read off the wire, not guessed from a row-stride heuristic)."""
@@ -245,7 +245,7 @@ def resolve_dims(raw, out):
     Slicing by the HEADER dims (not by parse_rooms' boundary) is what keeps decode robust:
     some frames decompress to exactly W*H+2 bytes (a 2-byte room footer), which made the old
     find_width path mis-detect the stride (e.g. 418×41) on in-progress/edge frames. See
-    DESIGN_NOTES s26. `(0,0)` reset frames → grid_dims_from_header returns None → fallback."""
+    PROTOCOL s26. `(0,0)` reset frames → grid_dims_from_header returns None → fallback."""
     hdr = grid_dims_from_header(raw)
     if hdr and hdr[0] * hdr[1] <= len(out):
         W, H = hdr
@@ -262,7 +262,7 @@ def fit_origin(grid, W, H, pts, res=GRID_MM_PER_PIXEL):
     inside the W×H grid, which bounds the search tightly. Returns (ox, oy, res, score) with
     score = on-floor fraction, or None if it can't fit.
 
-    The origin is NOT transmitted in the map frame (exhaustive header+body search, DESIGN_NOTES
+    The origin is NOT transmitted in the map frame (exhaustive header+body search, PROTOCOL
     s25), but it's stable to ~1px per home — so we derive it per capture instead of shipping
     a hand-fit constant. This generalises the overlay to any home/dock without calibration.
     """
@@ -396,6 +396,18 @@ def parse_virtual_walls(value):
     return walls
 
 
+def encode_virtual_walls(walls):
+    """Inverse of parse_virtual_walls → base64 blob for VIRTUAL_WALL (DP 56).
+    `[count:u8]` + per wall `(y1,x1,y2,x2)` BE-int16 (8 B/wall) — the SAME stored (y,x) order
+    parse_virtual_walls reads, so `walls` is a list of ((y1,x1),(y2,x2)) tuples in that stored order
+    (the caller does any path-frame (x,y)↔(y,x) swap). Empty list → `AA==` (count 0).
+    Round-trips the s30 captured DP-56/57 blobs byte-identically (validated). Coords = robot units (~5 mm)."""
+    out = bytes([len(walls)])
+    for (y1, x1), (y2, x2) in walls:
+        out += struct.pack(">hhhh", int(y1), int(x1), int(y2), int(x2))
+    return base64.b64encode(out).decode()
+
+
 def parse_restricted_zones(value, want_type):
     """RESTRICTED_ZONE_UP / ZONED_UP base64 → list of 4-corner polygons in mm.
 
@@ -436,6 +448,53 @@ def parse_restricted_zones(value, want_type):
     return zones
 
 
+# RESTRICTED_ZONE type codes — s26 ground-truth, re-confirmed by the s30 capture decode
+# (no-go/no-mop/threshold; there is NO "type 1" here — virtual walls are the separate DP 56).
+RZONE_TYPES = {0: "no-go", 2: "no-mop", 3: "threshold"}
+RZONE_NAMES = {v: k for k, v in RZONE_TYPES.items()}
+_RZONE_STRIDE = 2 + 9 * 4  # 38: [type][nverts] + up to 9 (x,y) BE-int16, zero-padded
+
+
+def parse_all_restricted_zones(value):
+    """Full decode of RESTRICTED_ZONE(_UP) → [(type:int, [(x,y),...]), ...] (every zone, with its type).
+    Inverse of encode_restricted_zones; coords are robot units (~5 mm/unit). cf. parse_restricted_zones."""
+    if not value:
+        return []
+    raw = base64.b64decode(value)
+    if len(raw) < 2 or raw[0] != 0x01:
+        return []
+    count = raw[1]
+    if count == 0:
+        return []
+    body = len(raw) - 2
+    stride = body // count if body % count == 0 and body // count >= 6 else _RZONE_STRIDE
+    zones = []
+    for i in range(count):
+        off = 2 + i * stride
+        if off + 2 > len(raw):
+            break
+        ztype, nverts = raw[off], raw[off + 1]
+        pts = []
+        for j in range(nverts):
+            p = off + 2 + j * 4
+            if p + 4 > len(raw):
+                break
+            pts.append(struct.unpack(">hh", raw[p:p + 4]))
+        zones.append((ztype, pts))
+    return zones
+
+
+def encode_restricted_zones(zones):
+    """Inverse of parse_all_restricted_zones → base64 blob for RESTRICTED_ZONE (DP 54).
+    `[0x01][count]` + count × 38-byte slots `[type][nverts]` + nverts×(x,y) BE-int16, zero-padded.
+    Round-trips the s30 captured SET/echo blobs byte-identically (validated). Coords = robot units (~5 mm)."""
+    out = bytes([0x01, len(zones)])
+    for ztype, pts in zones:
+        slot = bytes([ztype, len(pts)]) + b"".join(struct.pack(">hh", int(x), int(y)) for x, y in pts)
+        out += slot.ljust(_RZONE_STRIDE, b"\x00")
+    return base64.b64encode(out).decode()
+
+
 def parse_carpets(value):
     """CARPET_UP JSON → list of 4-corner polygons in mm."""
     if not value:
@@ -454,8 +513,9 @@ def _mm_to_pixel(mm_y, mm_x, W, H, scale,
                  coord_scale=1):
     """Convert coords → scaled image pixel. Returns None if OOB.
 
-    coord_scale=2 for wall/zone/carpet DPs whose stored values are in half-mm
-    units (empirically: stored_val × 2 = path mm, k≈1.98 from both axes).
+    coord_scale=2 is CORRECT for wall/zone/carpet DPs: their stored values are
+    zone/wall units of ~5 mm = 2× the ~2.5 mm path-unit (k≈1.98 from both axes).
+    (Earlier "half-mm" wording was the s13/s26 half-mm/half-cm slip — corrected s30.)
     """
     col = (mm_y * coord_scale - oy) // res
     row = (ox - mm_x * coord_scale) // res
@@ -535,7 +595,7 @@ def render_overlay_png(grid, W, H, rooms, path_pts, dp_overlay=None, scale=3,
             return _mm_to_pixel(mm_y, mm_x, W, H, scale, ox, oy, res, coord_scale=2)
 
         # Virtual walls — dark red thick lines
-        # Wall format is (y,x) in path space (see DESIGN_NOTES session 9 + docstring)
+        # Wall format is (y,x) in path space (see PROTOCOL session 9 + docstring)
         for (y1, x1), (y2, x2) in dp_overlay.get("walls", []):
             p1 = to_px(y1, x1)
             p2 = to_px(y2, x2)
@@ -653,7 +713,7 @@ def largest_path(paths):
 def build_map_json(cap, dps_path=None):
     """Decode a `watch --bytes` capture into a structured, machine-consumable dict.
 
-    The "give others the data" surface (ROADMAP #21): a status panel / web UI / HA shell
+    The "give others the data" surface (CAPABILITIES #21): a status panel / web UI / HA shell
     command can consume this instead of parsing a PNG. Coordinate frames — path,
     robot.position_mm, path.points_mm, and overlay shapes are robot **mm** (path frame);
     room bbox/centroid and robot.position_px are grid **pixels**; the `georeference`
@@ -788,7 +848,7 @@ def main():
                 sys.exit(f"Cannot read {f}: {e}")
 
     # Machine-consumable output: structured data on stdout, no images, no chatter
-    # (so `decode_map.py cap.jsonl --json | jq` is clean). See build_map_json / ROADMAP #21.
+    # (so `decode_map.py cap.jsonl --json | jq` is clean). See build_map_json / CAPABILITIES #21.
     if json_mode:
         print(json.dumps(build_map_json(cap, dps_path), indent=2))
         return

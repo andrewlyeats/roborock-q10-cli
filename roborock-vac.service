@@ -1,5 +1,8 @@
 # Conservative systemd --user unit for the Roborock single-connection daemon.
 #
+# EXPERIMENTAL: the daemon and its exit-code taxonomy are tested, but this unit itself has NOT been
+# validated under a live systemd. Provided as a conservative starting point — review before relying on it.
+#
 # FAIL-STOP by design: it is FAR better for this to stop and wait for you than to auto-restart
 # into the account-level rate-limit (`135`), which also locks out the phone app. So it runs with
 # --careful (halt on the first rate-limit/auth complaint, do not reconnect), and it does NOT

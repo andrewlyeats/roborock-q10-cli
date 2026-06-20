@@ -5,9 +5,74 @@ Notable changes to this project. Format loosely follows
 undocumented cloud protocol and relies on `python-roborock` internals, each release notes the
 environment it was **validated against** — check that before trusting it on a newer stack.
 
+## [0.1.2] — 2026-06-19 — write surface unlocked, reliability fixes, and public-docs finalization
+
+Same stack (Q10 S5+, firmware **03.11.24**, `python-roborock` **5.14.x**). This is the largest change since
+0.1.1 and supersedes the 0.1.1 finding that stored prefs don't stick from the CLI (below).
+
+### 2026-06-19 (commits `f6ad9b2` · `63184f5` · `da0e19a` · `3c4794f` · `6b08b11` · `fcd183f`)
+
+#### Fixed
+- **`status` stale-cache warning** (`f6ad9b2`) — a long-running daemon could silently serve an 88-min-old
+  snapshot with no indication the robot was offline. `cmd_status` now checks `_INJECTED_LAST_UPDATE` (set by
+  the daemon on connect) and prints a human warning / adds `stale`+`data_age_s` to `--json` when data is
+  older than 90 s. Threshold: 90 s (daemon refreshes every ~15–30 s + 30 s keepalive). 9 offline tests
+  (`test_status_stale.py`). The standalone `--force` path is unchanged (fetches live each call).
+- **`cmd_dnd` rewritten to the captured app wire form** (`63184f5` · `da0e19a` · `3c4794f`) — the old
+  implementation was doubly inert: wrong envelope (direct `command.send`, not string-key COMMON) and wrong
+  encoding for the schedule window (JSON dict, not the 6-byte base64 blob). Rewritten to send DP 25
+  (`NOT_DISTURB` bool master enable) and DP 33 (`NOT_DISTURB_DATA` base64 window) via `_common_set`. New
+  codec `_encode/_decode_dnd_window` round-trips both captured samples byte-exact (`test_dnd_window.py`, 5
+  offline tests). **Live-validated 2026-06-19** (supervised): DP 25 flipped off→0, on→1, both stuck on
+  re-read; DP 33 window `/BYACQAA` (22:00–09:00) read back exactly (2×); DND schedule left at 22:00–09:00.
+
+#### Added
+- **`read` time-window rendering** (`6b08b11`) — `vac.py read NOT_DISTURB_DATA` and
+  `vac.py read VALLEY_POINT_CHARGING_DATA_UP` now decode the 6-byte blob into a human-readable
+  `HH:MM–HH:MM (on/off)` string. Shared decoder `_decode_time_window` (`test_dnd_window.py`).
+
+#### Changed
+- **`clean-rooms` purges spent one-time jobs** (`fcd183f`) — fired one-time jobs (those with
+  `repeated==False and enabled==False`) accumulate as `✗` clutter; the REST path now best-effort-deletes
+  them after each run (`_purge_spent_onetime_jobs`; skipped on `--dry-run`; DELETE errors are logged, never
+  fatal). Count surfaced in the success line. Offline-tested (`test_code_quality.py`); live smoke pending.
+- **`--timeout`/`--interval` guards** (`fcd183f`) — non-integer or missing values now exit cleanly via
+  `_int_arg` (mirrors `_hhmm_arg`) instead of raising `ValueError` or `TypeError`.
+
+### Added
+- **`wall` / `zone` commands** — set/clear virtual walls (DP 56) and no-go/no-mop zones (DP 54) over MQTT;
+  wall-SET round-trip and zone-SET are live-validated. No robot motion.
+- **`multimap list`**, **`read <DP>`**, **`history --record`** commands; **live `history` op:list pull**
+  (the back-catalog now fetches directly, no capture needed).
+
+### Changed / overturned
+- **Stored settings are settable.** 0.1.1's "writes revert" interpretation was a
+  **wrong-wire-format bug**: writes used an enum-member inner key in the COMMON(101) envelope. With the
+  **string-key COMMON** form (the shape the app uses), volume/child-lock/boost/DND/dust/route/carpet stick.
+  Exceptions that genuinely don't stick: `BREAKPOINT_CLEAN`, `MAP_SAVE_SWITCH`.
+- **Walls/zones are no longer "read-only"**, and the **live history pull is no longer "app-only"** — both
+  were the same wire-format bug.
+- **Manual drive is no longer "app-only".** Same wire-format bug — `vac.py drive` went through the library
+  `RemoteTrait` (enum-member inner key); the **string-key COMMON** form drives the robot (live-validated 2026-06-19).
+- **Coordinate units corrected** — zone/wall ~5 mm/unit (was "half-mm", 10× off); path ≈2.5 mm/unit; grid ≈50 mm/px.
+- **CLEAN_RECORD** decode confirmed (area ÷1000, field 2 = active-clean minutes; mirrors `b01_q7.CleanRecordDetail`).
+
+### Method
+- The write surface was unlocked by **running the app in an Android emulator and observing its own traffic** —
+  not the network-level MQTT interception once thought necessary.
+
+### Docs
+- Reference (CAPABILITIES / DP_DICTIONARY / PROTOCOL / FRAME_ANATOMY / README) brought
+  current to the above, verified by adversarial cross-check against the original captures.
+- Clarified the two room-clean paths: **`clean-rooms --mqtt`** = instant MQTT segment-clean (no Hawk, each
+  room's saved settings); the default REST `/jobs` job is the scheduled / per-param path. Earlier docs
+  implied REST `/jobs` was the only way.
+- Marked the headless `roborock-vac.service` **experimental** — the unit isn't validated under a live
+  `systemd` (the daemon + exit codes it relies on are tested).
+
 ## [0.1.1] — 2026-06-18
 
-Live-validation + reference-accuracy work (sessions **s27–s28**), same stack as 0.1.0 (Q10 S5+,
+Live-validation + reference-accuracy work, same stack as 0.1.0 (Q10 S5+,
 firmware **03.11.24**, `python-roborock` **5.14.x**): a fast REST status command, plus a broad docs
 accuracy/readability pass.
 
@@ -16,7 +81,7 @@ accuracy/readability pass.
   one Hawk-signed GET, **no MQTT session and no daemon needed** (so it can't trip the `135` connection cap).
   Surfaces state / battery / fan / consumable work-times. Note it reads the **legacy v1 dp space**
   (`RoborockStateCode`: `8`=charging agrees, but a cleaning robot reads as v1 `5`/`17`/`18`, not the B01
-  `101–105` codes) — distinct from the MQTT `status`. Endpoint validated live (s28). See [CAPABILITIES.md](CAPABILITIES.md).
+  `101–105` codes) — distinct from the MQTT `status`. Endpoint validated live. See [CAPABILITIES.md](CAPABILITIES.md).
 - **`drive <forward|left|right|stop|exit>`** — manual remote-drive command (B01 `RemoteTrait`). Built,
   but **proven inert on this firmware**: CLI `REMOTE` writes never move the robot or reach `STATUS=7`,
   while the *same* drive from the Roborock app does — manual drive rides the robot's **blocked input
@@ -32,10 +97,11 @@ accuracy/readability pass.
   "where is it now" now uses the most-recent frame, while the georeference fit still uses the most-complete
   frame (most points → best registration). `decode_map.py --json` gains a `path_frame_selection` note.
 
-### Findings (live, s27) — docs only
-- **The write path is now mapped per-DP across the whole settings surface.** Every *reportable* stored
-  preference is cloud-authoritative (MQTT writes don't stick, bare or COMMON-wrapped), while runtime
-  cleaning params incl. `CLEAN_COUNT` are settable. `CAPABILITIES.md` / `DP_DICTIONARY.md` updated DP-by-DP.
+### Findings (live) — docs only
+- **The write path is now mapped per-DP across the whole settings surface.** At the time, every *reportable* stored
+  preference appeared not to stick from the CLI (MQTT writes ignored, bare or COMMON-wrapped), while runtime
+  cleaning params incl. `CLEAN_COUNT` were settable. `CAPABILITIES.md` / `DP_DICTIONARY.md` updated DP-by-DP.
+  *(Later overturned — those prefs ARE settable via the string-key COMMON envelope; see [Unreleased].)*
 - **`STOP` promoted to validated ✅** — halts an active clean if caught before it commits to docking.
 - **Manual drive reclassified to 🔴 app-only** (see Added). The four structured action DPs
   (`TASK_CANCEL_IN_MOTION` / `JUMP_SCAN` / `GROUND_CLEAN` / `BEAK_CLEAN`) and `START_BACK` are no-ops via a
@@ -47,7 +113,7 @@ accuracy/readability pass.
 
 ### Docs
 - Accuracy + readability pass across the protocol reference (PROTOCOL / CAPABILITIES / DP_DICTIONARY /
-  DESIGN_NOTES / FRAME_ANATOMY / ROADMAP): reconciled cross-doc contradictions, leaned out the public copy,
+  FRAME_ANATOMY): reconciled cross-doc contradictions, leaned out the public copy,
   and sharpened onboarding (clone step + interpreter caveat) and the capability "open frontier" summary.
 
 ## [0.1.0] — 2026-06-17
@@ -109,7 +175,7 @@ First public release — the reverse-engineering reference + CLI for the Roboroc
   walked them tightly-packed, so with more than one zone it misread a no-go's padding as an empty second
   zone and missed the rest. Now slot-aware, and no-mop zones (type `0x02`) are recognised.
 
-### Known gaps (see [ROADMAP.md](ROADMAP.md))
+### Known gaps (see [CAPABILITIES.md](CAPABILITIES.md#limitations))
 - Daemon persistent connection is now **validated live** (holds one connection, survives a clean cycle,
   cheap restart) — but **135 cool-down recovery** is still unproven; `--force` one-shot remains the fallback.
 - One fault-free complete physical room clean is still pending (a supervised run reached the room but the

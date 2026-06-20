@@ -4,7 +4,7 @@
 #
 # Why this exists: `requires-python = ">=3.11"` makes `pip install .` REFUSE on Python
 # 3.9/3.10 instead of silently downgrading python-roborock to an ancient 0.x with no B01
-# modules — the project's #1 false-alarm trap (see DESIGN_NOTES "Dependency fragility").
+# modules — the project's #1 false-alarm trap (see CAPABILITIES.md, "Limitations").
 # The `vac` console script also installs onto the correct interpreter, retiring the
 # hardcoded-shebang fragility for installed users (`./vac.py` still works as before).
 #
@@ -16,7 +16,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roborock-q10-cli"
-version = "0.1.1"
+version = "0.1.2"
 description = "Unofficial CLI + reverse-engineered protocol reference for the Roborock Q10 (B01) cloud protocol"
 readme = "README.md"
 requires-python = ">=3.11"
