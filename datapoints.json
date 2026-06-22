@@ -1,9 +1,9 @@
 {
   "schema": "roborock-b01-q10-datapoints/1",
   "generated_by": "gen_datapoints.py (from python-roborock B01_Q10_DP + YX* enums)",
-  "note": "Names/keys/enum labels are authoritative (the library). MEANINGS, confidence tiers, numeric codes, provenance, and open questions live in DP_DICTIONARY.md — the canonical reference; this file is the machine-readable index only (the DP-layer analog of frames.ksy).",
+  "note": "Names/keys/enum labels are authoritative (the library). MEANINGS, confidence tiers, numeric codes, provenance, and open questions live in DP_DICTIONARY.md — the canonical reference; this file is the machine-readable index only (the DP-layer analog of frames.ksy). Known library gaps as of 5.14.2: (1) YXCleanType lacks value 6 (SWEEP_MOP) — the Q10 emits code 6 via YXDeviceWorkMode; decoding a CLEAN_TYPE=6 payload via YXCleanType crashes. (2) YXDeviceDustCollectionFrequency code 0 is mislabeled 'DAILY' in the library; PR #846 renames it to 'REGULAR' (the app's actual label for that setting).",
   "datapoint_count": 114,
-  "documented_count": 103,
+  "documented_count": 114,
   "datapoints": [
     {
       "name": "ADD_CLEAN_AREA",
@@ -45,7 +45,7 @@
       "name": "BEAK_CLEAN",
       "key": "dpBeakClean",
       "code": null,
-      "documented": false
+      "documented": true
     },
     {
       "name": "BREAKPOINT_CLEAN",
@@ -123,7 +123,7 @@
       "name": "CLEAN_ORDER",
       "key": "dpCleanOrder",
       "code": null,
-      "documented": false
+      "documented": true
     },
     {
       "name": "CLEAN_PROGRESS",
@@ -183,7 +183,7 @@
       "name": "CUSTOMER_CLEAN_REQUEST",
       "key": "dpCustomerCleanRequest",
       "code": null,
-      "documented": false
+      "documented": true
     },
     {
       "name": "CUSTOM_MODE",
@@ -261,7 +261,7 @@
       "name": "IGNORE_OBSTACLE",
       "key": "dpIgnoreObstacle",
       "code": null,
-      "documented": false
+      "documented": true
     },
     {
       "name": "JUMP_SCAN",
@@ -399,31 +399,31 @@
       "name": "REQUEST_NOT_DISTURB_DATA",
       "key": "dpRequestNotDisturbData",
       "code": null,
-      "documented": false
+      "documented": true
     },
     {
       "name": "REQUEST_TIMER",
       "key": "dpRequestTimer",
       "code": null,
-      "documented": false
+      "documented": true
     },
     {
       "name": "RESET_FILTER",
       "key": "dpResetFilter",
       "code": null,
-      "documented": false
+      "documented": true
     },
     {
       "name": "RESET_MAIN_BRUSH",
       "key": "dpResetMainBrush",
       "code": null,
-      "documented": false
+      "documented": true
     },
     {
       "name": "RESET_RAG_LIFE",
       "key": "dpResetRagLife",
       "code": null,
-      "documented": false
+      "documented": true
     },
     {
       "name": "RESET_ROOM_NAME",
@@ -435,13 +435,13 @@
       "name": "RESET_SENSOR",
       "key": "dpResetSensor",
       "code": null,
-      "documented": false
+      "documented": true
     },
     {
       "name": "RESET_SIDE_BRUSH",
       "key": "dpResetSideBrush",
       "code": null,
-      "documented": false
+      "documented": true
     },
     {
       "name": "RESTRICTED_AREA",

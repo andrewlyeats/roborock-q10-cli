@@ -2,15 +2,19 @@
 """
 Decode the Roborock Q10 (B01) live map from a `vac.py watch --bytes` capture.
 
-The robot streams protocol-301 `map_response` frames over MQTT *while cleaning*
-(spontaneously — no request needed). python-roborock's B01 path drops them (its
-dps decoder only accepts protocol-102 JSON), so `watch --bytes` is how we capture
-them. This tool decodes them.
+The robot streams protocol-301 `map_response` frames over MQTT while cleaning
+(spontaneously), and also on demand to any client that sends DP-110 (HEARTBEAT)
+polls — the live-map keepalive the app sends ~every 5s. So the live map + path is
+available outside a clean too (not "only while cleaning"). python-roborock's B01
+path drops these frames (its dps decoder only accepts protocol-102 JSON), so
+`watch --bytes` (or a daemon bytes tap) is how we capture them. This tool decodes them.
 
 Two 301 sub-types, distinguished by their 2-byte sub-type prefix (`0101`/`0201`);
 the 8-byte example headers below show the surrounding constant/per-map bytes:
   • 0201000800020000  — the CLEANING PATH. Big-endian int16 (x,y) pairs after a
-    16-byte header (bytes 8-9 = point count). Units = mm; LAST point = robot's
+    14-byte header (bytes 8-9 = point count; raw pose starts at byte 14; the
+    clean-render georef reads byte 16 as a tuned offset — see parse_path).
+    Units = path-units (~2.5 mm/unit, not true mm); LAST point = robot's
     current position; first ≈ dock. Rendered to an SVG polyline.
   • 0101…  — the ROOM/OCCUPANCY GRID (match the 2-byte prefix; bytes 2-5 are a
     device-specific map id). **LZ4-compressed** (not RLE).
@@ -27,7 +31,7 @@ Optional DP overlay (--dps <raw-watch-jsonl>):
   Pass a `watch --raw` JSONL (or your_capture.jsonl) to overlay walls, no-go
   zones, cleaning zones, and carpets on the map_overlay.png.
   DP formats (decoded sessions 9-26; no-mop type corrected to 0x02 in s26):
-    VIRTUAL_WALL_UP  = [count:u8] + count×(x1,y1,x2,y2) BE int16, mm.
+    VIRTUAL_WALL_UP  = [count:u8] + count×(x1,y1,x2,y2) BE int16, ~5 mm/unit.
                        NOTE: wall coords are (y,x) vs path's (x,y) — first value
                        is path_y, second is path_x (swap on coord_to_pixel call).
     RESTRICTED_ZONE_UP = [0x01][count:u8] + count×([type:u8][nverts:u8=4] + 4×(x,y) BE int16)
@@ -64,14 +68,15 @@ PATH_SIG = "0201"
 # device/home — matching the full signature would find zero frames on anyone else's robot.
 GRID_PREFIX = "0101"
 
-# Grid ↔ path registration. These constants are the FALLBACK/default only — the live path now
-# auto-fits the origin per capture (s25: fit_origin, used by build_map_json + main), dropping to
-# these just when the fit is weak. Empirically derived; stable while dock position / map unchanged.
+# Grid ↔ path registration. PRIMARY source is now origin_from_header() — the origin IS transmitted
+# in every 0101 header (ox=2*y_min, oy=-2*x_min; validated at parity with auto-fit). fit_origin is a
+# FALLBACK/cross-check for null-origin frames; these constants are the last-ditch default. Stable
+# while dock position / map unchanged.
 # col = (path_y - GRID_ORIGIN_OY) // GRID_MM_PER_PIXEL   ← grid column  (x-axis)
 # row = (GRID_ORIGIN_OX - path_x) // GRID_MM_PER_PIXEL   ← grid row     (y-axis, inverted)
-# Score: 99.87 % of path points land on floor pixels at these values (6117/6125).
-GRID_ORIGIN_OX = 1001   # mm — path_x that maps to grid row 0 (top edge)
-GRID_ORIGIN_OY = -3307  # mm — path_y that maps to grid col 0 (left edge)
+# (Legacy default below = an old auto-fit value, 99.87% on its capture; superseded by the header read.)
+GRID_ORIGIN_OX = 1001   # path-units (~2.5 mm/unit) — path_x that maps to grid row 0 (top edge)
+GRID_ORIGIN_OY = -3307  # path-units (~2.5 mm/unit) — path_y that maps to grid col 0 (left edge)
 GRID_MM_PER_PIXEL = 20  # PATH-UNITS per grid pixel, NOT mm. path≈2.5 mm/unit → ≈50 mm/px (the standard Roborock resolution). The registration path//20=pixel is correct; only the "mm" label was wrong — see DP_DICTIONARY coord-frame note.
 
 # Room palette (room_id -> RGB). Stable, distinct, readable on white.
@@ -123,6 +128,11 @@ def parse_path(raw):
     Leads — longer/multi-segment cleans (→ higher byte[3]), or map type (s23/s24/s26 were the
     multi-map-build window). Settle it with a targeted capture: short vs long/resumed clean, original
     vs freshly-built map, and check whether the sentinel appears. See PROTOCOL s28.
+    NEW DATA (2026-06-20): teleop `0201` frames (heartbeat-driven — pose_hb1/hb4) carry NO sentinel —
+    `count` matches the real points exactly (a count=1 frame holds one true (x,y) at bytes 14-17,
+    confirming the offset-14 layout directly). So the sentinel is a CLEAN-mode artifact, not a property
+    of the 0201 format → narrows the trigger to autonomous-clean path recording. `pose_extract.py`
+    reads raw pose at offset 14; this renderer keeps offset-16 + the x<->y swap as its tuned cancellation.
     """
     count = struct.unpack(">H", raw[8:10])[0]
     body = raw[16:]
@@ -219,7 +229,7 @@ def find_width(grid):
         score = diff / ((H - 1) * W)
         if best is None or score < best[0]:
             best = (score, W, H)
-    return best[1], best[2]  # (W, H)
+    return (best[1], best[2]) if best else None  # (W, H); None if no plausible width found
 
 
 def grid_dims_from_header(raw):
@@ -252,8 +262,37 @@ def resolve_dims(raw, out):
         return W, H, out[:W * H], "header"
     _, grid_len = parse_rooms(out)
     grid = out[:grid_len]
-    W, H = find_width(grid)
+    fw = find_width(grid)
+    if fw is None:
+        raise ValueError(
+            f"resolve_dims: ungridable frame — no plausible header dims (raw[7:11]) and no "
+            f"factorable row width (decompressed len={len(out)}, grid_len={grid_len}). Likely a "
+            f"partial/in-progress or reset frame, not a finalized map. build_map_json picks the "
+            f"largest grid frame, so a finalized capture won't hit this.")
+    W, H = fw
     return W, H, grid, "find_width"
+
+
+def origin_from_header(raw):
+    """Map georef origin (ox, oy), read DIRECTLY from the 0101 grid-frame header — retires auto-fit.
+
+    The header carries the map origin (the block long thought "unknown"): x_min @ bytes 11-12,
+    y_min @ bytes 13-14 (s16 BE), in 5-mm units (= 2 path-units each, since 1 path-unit ≈ 2.5 mm).
+    So the path→grid registration is EXACT, not searched:
+        ox = 2 * y_min   (path_x at grid row 0)      oy = -2 * x_min   (path_y at grid col 0)
+    (Cross-checked vs the app's own JS map parser `parserPublicRealTimeMap`, and validated at on-floor
+    PARITY with the old auto-fit on 29/31 captures — gap_research/validate_origin.py. The header also
+    carries resolution @ 15-16 [/100 m/px = 0.05 = 50 mm/px = 20 path-units/px] and the dock pose @
+    17-22.) Returns (ox, oy) or None for a null/keepalive frame (x_min==y_min==0) so the caller can
+    fall back to fit_origin.
+    """
+    if not raw or len(raw) < 15 or raw[:2] != b"\x01\x01":
+        return None
+    x_min = struct.unpack(">h", raw[11:13])[0]
+    y_min = struct.unpack(">h", raw[13:15])[0]
+    if x_min == 0 and y_min == 0:
+        return None
+    return 2 * y_min, -2 * x_min
 
 
 def fit_origin(grid, W, H, pts, res=GRID_MM_PER_PIXEL):
@@ -262,9 +301,11 @@ def fit_origin(grid, W, H, pts, res=GRID_MM_PER_PIXEL):
     inside the W×H grid, which bounds the search tightly. Returns (ox, oy, res, score) with
     score = on-floor fraction, or None if it can't fit.
 
-    The origin is NOT transmitted in the map frame (exhaustive header+body search, PROTOCOL
-    s25), but it's stable to ~1px per home — so we derive it per capture instead of shipping
-    a hand-fit constant. This generalises the overlay to any home/dock without calibration.
+    FALLBACK ONLY: the origin IS transmitted in the 0101 header (x_min@11-12, y_min@13-14) —
+    `origin_from_header()` reads it directly and is the primary source. This auto-fit is kept as a
+    fallback/cross-check for null-origin frames; it lands at on-floor parity with the header origin
+    (29/31 captures). (The old "origin is NOT transmitted, exhaustive search" belief — PROTOCOL s25 —
+    was overturned by the gap-research byte-coverage sweep; see origin_from_header.)
     """
     if len(pts) < 4:
         return None
@@ -375,7 +416,7 @@ def load_dp_overlay(dps_path):
 
 
 def parse_virtual_walls(value):
-    """VIRTUAL_WALL_UP base64 → list of ((y1,x1),(y2,x2)) in mm path space.
+    """VIRTUAL_WALL_UP base64 → list of ((y1,x1),(y2,x2)) in wall units (~5 mm/unit).
 
     Wall coords are stored as (y,x) not (x,y) — swap relative to the path frame.
     Confirmed against drawn wall (-811,-836)→(-815,-1153) matching app display.
@@ -409,7 +450,7 @@ def encode_virtual_walls(walls):
 
 
 def parse_restricted_zones(value, want_type):
-    """RESTRICTED_ZONE_UP / ZONED_UP base64 → list of 4-corner polygons in mm.
+    """RESTRICTED_ZONE_UP / ZONED_UP base64 → list of 4-corner polygons in ~5 mm/unit.
 
     Format: [0x01][count:u8] + count × FIXED-SIZE slots. Each slot:
       [type:u8][nverts:u8] + nverts×(x,y) BE int16, then ZERO-PADDED to the slot stride
@@ -496,7 +537,7 @@ def encode_restricted_zones(zones):
 
 
 def parse_carpets(value):
-    """CARPET_UP JSON → list of 4-corner polygons in mm."""
+    """CARPET_UP JSON → list of 4-corner polygons in ~5 mm/unit."""
     if not value:
         return []
     data = value if isinstance(value, dict) else json.loads(value)
@@ -769,22 +810,33 @@ def build_map_json(cap, dps_path=None):
 
         ox, oy, res = GRID_ORIGIN_OX, GRID_ORIGIN_OY, GRID_MM_PER_PIXEL
         fit_method, fit_score = "default", None
+        hdr = origin_from_header(raw)          # the origin IS in the frame header — prefer it; retires auto-fit
+        if hdr:
+            ox, oy = hdr
+            fit_method = "header"
         if pts:
             fit = fit_origin(grid, W, H, fit_pts or pts)
-            if fit and fit[3] >= 0.90:
-                ox, oy, res, fit_score = fit
-                fit_method = "auto"
-            elif fit:
-                fit_score = fit[3]
-                fit_method = "default(weak-fit)"
+            if fit:
+                fit_score = fit[3]             # auto-fit score retained as a cross-check on the header origin
+                if fit_method != "header":
+                    if fit[3] >= 0.90:
+                        ox, oy, res, fit_method = fit[0], fit[1], fit[2], "auto"
+                    else:
+                        fit_method = "default(weak-fit)"
         result["georeference"] = {
             "origin_mm": {"ox": ox, "oy": oy},
             "resolution_mm_per_px": res,
+            "grid_mm_per_px": round(res * 2.5),   # ≈50: the TRUE physical cell size (1 path-unit ≈ 2.5 mm)
             "fit_method": fit_method,
             "fit_score": round(fit_score, 4) if fit_score is not None else None,
             "transform": "col = (path_y - oy) // res ; row = (ox - path_x) // res",
+            "unit_note": ("⚠ origin_mm / resolution_mm_per_px are MISLABELED for back-compat: ox/oy/res and the 0201 "
+                          "path coords are PATH-UNITS (≈2.5 mm/unit, anchored to the app's 3.3 ft default zone), NOT mm. "
+                          "resolution_mm_per_px=20 means 20 path-units/px; the true physical cell is grid_mm_per_px≈50. "
+                          "Use res (path-units) in `transform`; use grid_mm_per_px for physical distances. "
+                          "(A clean rename to *_pathunits is pending — kept under the old keys for back-compat.)"),
             "axis_note": "grid col from path y, grid row from path x; row axis inverted; oy is typically negative.",
-            "origin_note": "origin is NOT in the frame — auto-fit per capture; per-install (dock-anchored), stable until the dock moves or the map resets.",
+            "origin_note": "origin IS in the 0101 header (x_min@11-12, y_min@13-14, s16 BE, 5-mm units): ox=2*y_min, oy=-2*x_min (fit_method='header'). auto-fit is now a fallback/cross-check for null-origin frames; per-install, stable until the dock moves or the map resets.",
         }
 
         if pts:
@@ -795,7 +847,7 @@ def build_map_json(cap, dps_path=None):
                 "in_grid": rc is not None,
                 "current_room": ({"id": rid, "name": rooms.get(rid, f"room{rid}")}
                                  if rid is not None else None),
-                "note": "position/room are live only DURING a clean; docked → no path frame is emitted.",
+                "note": "position/room are live during a clean OR while DP-110 HEARTBEAT polls are active (teleop pose); docked-idle with no heartbeat → no path frame is emitted.",
             }
 
     if dps_path:
@@ -892,10 +944,16 @@ def main():
         if paths:
             pts, _ = parse_path(largest_path(paths)[1])   # fit on the most-complete frame (best registration)
             pts = _drop_path_outlier(pts)      # s24: same sentinel strip as the SVG path
-            fit = fit_origin(grid, W, H, pts)  # s25: derive registration per capture (origin isn't in the frame)
-            if fit and fit[3] >= 0.90:
-                ox, oy, res, sc = fit
-                print(f"  georef auto-fit: OX={ox} OY={oy} res={res} ({sc*100:.1f}% of path on floor)")
+            hdr = origin_from_header(raw)       # the origin is in the frame header — prefer it
+            fit = fit_origin(grid, W, H, pts)  # auto-fit kept as a cross-check / fallback
+            sc = fit[3] if fit else None
+            if hdr:
+                ox, oy, res = hdr[0], hdr[1], GRID_MM_PER_PIXEL
+                xc = f"{sc*100:.1f}% on floor" if sc is not None else "no path to cross-check"
+                print(f"  georef from header: OX={ox} OY={oy} res={res} (auto-fit cross-check: {xc})")
+            elif fit and fit[3] >= 0.90:
+                ox, oy, res = fit[0], fit[1], fit[2]
+                print(f"  georef auto-fit (no header origin): OX={ox} OY={oy} res={res} ({sc*100:.1f}% of path on floor)")
             else:
                 ox, oy, res = GRID_ORIGIN_OX, GRID_ORIGIN_OY, GRID_MM_PER_PIXEL
                 why = f"weak ({fit[3] * 100:.0f}%)" if fit else "no fit"

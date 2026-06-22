@@ -64,7 +64,12 @@ def build():
         "note": ("Names/keys/enum labels are authoritative (the library). MEANINGS, confidence "
                  "tiers, numeric codes, provenance, and open questions live in DP_DICTIONARY.md "
                  "— the canonical reference; this file is the machine-readable index only "
-                 "(the DP-layer analog of frames.ksy)."),
+                 "(the DP-layer analog of frames.ksy). Known library gaps as of 5.14.2: "
+                 "(1) YXCleanType lacks value 6 (SWEEP_MOP) — the Q10 emits code 6 via "
+                 "YXDeviceWorkMode; decoding a CLEAN_TYPE=6 payload via YXCleanType crashes. "
+                 "(2) YXDeviceDustCollectionFrequency code 0 is mislabeled 'DAILY' in the "
+                 "library; PR #846 renames it to 'REGULAR' (the app's actual label for that "
+                 "setting)."),
         "datapoint_count": len(entries),
         "documented_count": sum(1 for e in entries if e["documented"]),
         "datapoints": entries,

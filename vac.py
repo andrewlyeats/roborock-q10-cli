@@ -1669,9 +1669,11 @@ async def cmd_drive(action: str, duid):
     Validated live 2026-06-19 via string-key COMMON{"12":<code>}: the device State flips to
     `remote_control_active` and the robot drives. (The library RemoteTrait's enum-member key is inert
     — the same wrong-wire bug as the s30 settings overturn — so cmd_drive builds the envelope itself.)
-    No heading DP and the 301 path streams only during a clean, so motion itself isn't in telemetry.
-    Unsupervised drive can strand localization (→ physical power-cycle to recover), so drive only while
-    watching. See CAPABILITIES.md (Manual drive)."""
+    No heading DP. The 301 path streams during a clean AND on demand to any client that sends DP-110
+    (HEARTBEAT) polls (~5s — the app's live-map keepalive), so teleop pose CAN be captured by
+    heartbeating during a drive (`raw --common HEARTBEAT 1` + a daemon bytes tap) — not "only during
+    a clean." Unsupervised drive can strand localization (→ physical power-cycle to recover), so drive
+    only while watching. See CAPABILITIES.md (Manual drive)."""
     code = _DRIVE_CODES.get(action.lower()) if action else None
     if code is None:
         sys.exit("Usage: ./vac.py drive <forward|left|right|stop|exit>  (moves the robot — use a clear space)")
@@ -1771,7 +1773,7 @@ async def cmd_mode(mode: str, duid):
     await run_action(lambda p: p.vacuum.set_clean_mode(m), f"Mode set to {m.name.lower()}.", duid)
 
 
-# Time-window wire form, ground-truthed from the s30 app-wire capture (live_test_s30/decoded.jsonl). A
+# Time-window wire form, ground-truthed from the s30 app-wire capture. A
 # 6-byte base64 blob [flag, startHour, startMinute, endHour, endMinute, trail], flag 0xfc=on / 0x00=off.
 # SHARED by two features the app drives under string-key COMMON:
 #  • DND       DP 33  NOT_DISTURB_DATA          (trail always 0x00; e.g. "/BYACAAA"=22:00–08:00 on)
@@ -2038,13 +2040,41 @@ async def _common_op_pull(props, dp, request, match, *, timeout=15, tries=3, int
     return box.get("v")
 
 
+async def cmd_map_build(duid: str | None):
+    """Build a fresh map on demand (the app's "Create New Map" / quick-map). ⚠ MOVES the robot — it
+    undocks and runs a ~30–60 s explore (STATUS=mapping), saving a NEW map. **Needs a free map slot**
+    (cap ≈ 4 — free one first: `vac.py multimap delete <id> --yes`); with slots full it silently won't
+    save. After it docks, fetch the FINALIZED map with `vac.py map` (the saved map is onboard-cleaned /
+    re-segmented — it differs from the raw build stream). Validated 2026-06-20 (`START_CLEAN {"cmd":4}`)."""
+    await run_action(
+        lambda p: p.command.send(B01_Q10_DP.START_CLEAN, {"cmd": 4}),
+        "map-build: quick-map started (cmd:4) — ⚠ robot undocks + explores ~30–60 s. Needs a free map "
+        "slot; then run `vac.py map` to fetch the finalized map.", duid)
+
+
 async def cmd_multimap(rest: list[str], duid: str | None, as_json: bool = False, timeout: int = 15):
-    """List saved maps (multi-floor) — DP 61 op:list, READ-ONLY. Selecting/switching a map is
-    deliberately NOT exposed: it's motionless but re-localizes the robot (disorienting while parked),
-    and the saved-map set is rarely edited. Reply arrives on our own /m/o/ (string-key COMMON, s30)."""
+    """Manage saved maps (multi-floor) — DP 61 via string-key COMMON, validated 2026-06-20.
+      `list`         — read-only map list (id/name/timestamp).
+      `delete <id> --yes` — delete a saved map (IRREVERSIBLE; frees a slot — map cap ≈ 4).
+      `select <id>`  — switch the active map (motionless, but RE-LOCALIZES the robot — disorienting while parked).
+    Reply lands on our own /m/o/ (s30). To build a NEW map use `vac.py map-build` (needs a free slot)."""
     sub = (rest[0] if rest else "list").lower()
+    if sub in ("delete", "select"):
+        if len(rest) < 2:
+            sys.exit(f"Usage: ./vac.py multimap {sub} <map-id>" + (" --yes" if sub == "delete" else "")
+                     + "   (ids: ./vac.py multimap list)")
+        map_id = str(rest[1])
+        if sub == "delete" and "--yes" not in rest:
+            sys.exit(f"⚠ `multimap delete {map_id}` is IRREVERSIBLE. Re-run with --yes to confirm.")
+        warn = ("re-localizes the robot (disorienting while parked)" if sub == "select"
+                else "irreversible — the saved map is deleted")
+        await run_action(
+            lambda p: p.command.send(B01_Q10_DP.COMMON,
+                                     {str(B01_Q10_DP.MULTI_MAP.code): {"op": sub, "id": map_id}}),
+            f"multimap {sub} {map_id} sent — ⚠ {warn}. Verify with `multimap list`.", duid)
+        return
     if sub != "list":
-        sys.exit("Usage: ./vac.py multimap list   (select/switch intentionally omitted — see docs)")
+        sys.exit("Usage: ./vac.py multimap list | delete <id> --yes | select <id>")
     async with device_session(duid) as (device, props):
         print(f"Fetching maps from {device.name}…")
         mm = await _common_op_pull(
@@ -2153,7 +2183,7 @@ async def cmd_login(email: str):
 # yields (the daemon's held one, or a fresh --force one). Usage guards mirror main()
 # so a bad request returns a clean error instead of an IndexError. KEEP the command
 # set in sync with main()'s dispatch + the daemon's read-only/stream classification.
-_SIMPLE_CMDS = ("start", "stop", "pause", "resume", "dock", "dock-empty", "find")
+_SIMPLE_CMDS = ("start", "stop", "pause", "resume", "dock", "dock-empty", "find", "map-build")
 
 
 async def _run_one(cmd, rest, duid, as_json):
@@ -2176,7 +2206,7 @@ async def _run_one(cmd, rest, duid, as_json):
     elif cmd in _SIMPLE_CMDS:
         await {"start": cmd_start, "stop": cmd_stop, "pause": cmd_pause,
                "resume": cmd_resume, "dock": cmd_dock, "dock-empty": cmd_dock_empty,
-               "find": cmd_find}[cmd](duid)
+               "find": cmd_find, "map-build": cmd_map_build}[cmd](duid)
     elif cmd == "drive":
         if not rest: sys.exit("Usage: ./vac.py drive <forward|left|right|stop|exit>")
         await cmd_drive(rest[0], duid)
@@ -2935,7 +2965,7 @@ def _local_main(cmd, rest, duid, as_json):
                  "history": cmd_history}
     simple_cmds = {
         "start": cmd_start, "stop": cmd_stop, "pause": cmd_pause, "resume": cmd_resume,
-        "dock": cmd_dock, "dock-empty": cmd_dock_empty, "find": cmd_find,
+        "dock": cmd_dock, "dock-empty": cmd_dock_empty, "find": cmd_find, "map-build": cmd_map_build,
     }
     if cmd == "status" and "--quick" in rest:
         run_ro(lambda: cmd_status_quick(duid, as_json))

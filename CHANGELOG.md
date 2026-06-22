@@ -5,6 +5,49 @@ Notable changes to this project. Format loosely follows
 undocumented cloud protocol and relies on `python-roborock` internals, each release notes the
 environment it was **validated against** — check that before trusting it on a newer stack.
 
+## [0.1.3] — 2026-06-22 — autonomy layer (experimental), map origin from the header, live SLAM heading
+
+Same stack (Q10 S5+, firmware **03.11.24**, `python-roborock` **5.14.2** — locked; upstream is now 5.20.x).
+Adds an experimental standalone autonomy layer and folds in a round of map/protocol reverse-engineering —
+including a **correction to a claim shipped in 0.1.2** (see Corrected).
+
+### Added
+- **Autonomy layer (EXPERIMENTAL)** — standalone tooling built on top of `vac.py`'s cloud-MQTT comms, kept
+  *out* of the CLI: `pose_extract.py` (live x/y + heading + path-epoch from the `0201` stream),
+  `pose_monitor.py` (live-pose cockpit), `nav.py` (heading-aware, frame-agnostic go-to — closed-loop or
+  dead-reckon, `--rel`, multi-waypoint `--patrol`, reloc-loss + stuck aborts), `scan.py` (on-demand lidar
+  snapshot: heartbeat → decode the raw `0101` grid; no clean, no motion), and `recover.py`
+  (lost→remap→recover). See [AUTONOMY.md](AUTONOMY.md). **⚠ `nav`/`recover` MOVE the robot with no
+  AI/laser obstacle avoidance (hardware failsafes unverified) — supervise, clear the area, keep away
+  from drop-offs.** Enabled by two findings: DP-110 `HEARTBEAT`
+  elicits the live 301 stream on demand (no clean, no rig), and the `0201` header carries a live SLAM heading.
+- **Offline test suite + planner check shipped** — the pure unit/decode/codec tests and
+  `check_nav_planner.py` now ship, so the docs' "validated" rows have runnable evidence.
+
+### Corrected (supersedes 0.1.2)
+- **The map origin IS transmitted in the `0101` header** — bytes 11–14 (`x_min`/`y_min`, raw BE; 5 mm
+  units = 2 path-units), resolution at 15–16, dock coords at 17–22. 0.1.2 stated the origin was "not
+  transmitted / must be auto-fit" — that was **wrong**. `decode_map.py` now reads it from the header
+  (`origin_from_header`, `ox = 2·y_min`, `oy = −2·x_min`); auto-fit is demoted to a fallback/cross-check
+  (on-floor parity, 29/31 captures). The byte-layout figure (`assets/frame_layout.svg`) was regenerated to match.
+
+### Changed
+- **`0201` header fully decoded** — `path_epoch` (2–3), const (4–7), `point_count` (8–9), **`heading_deg`
+  (10–11)** — the live firmware SLAM heading the app ignores (drive-mode 1–2° / teleop 8.7° mae; clean-mode
+  heading diverges from the path tangent during maneuvering — instantaneous vs accumulated, not a tight
+  regime) — const (12–13), points at 14 (`decode_map`'s renderer still reads 16, an empirical sub-pixel wart
+  flagged for a refactor; byte 14 is the true start). Retires the old "byte-3 counter" / "unknown tail"
+  reads. Added to `frames.ksy` + FRAME_ANATOMY.
+- **`0301` / `0401` frames** reclassified from "undecoded" to the same `0101` grid codec (0301 = full-map
+  alternate layer; 0401 = per-room sub-grids).
+- **Upstream credit** corrected: our Hawk `/jobs` body-signing fix shipped as **PR #852** (5.15.2) and our
+  Q10 zone type-2/3 correction via **#850** (5.18.0).
+- `TIMER` DP confirmed **vestigial** on the Q10 (scheduling lives entirely in cloud REST `/jobs`).
+
+### Docs
+- Reference (FRAME_ANATOMY / PROTOCOL / CAPABILITIES / DP_DICTIONARY / README) brought current and
+  cross-checked; `datapoints.json` regenerated (114/114 documented).
+
 ## [0.1.2] — 2026-06-19 — write surface unlocked, reliability fixes, and public-docs finalization
 
 Same stack (Q10 S5+, firmware **03.11.24**, `python-roborock` **5.14.x**). This is the largest change since
@@ -87,6 +130,7 @@ accuracy/readability pass.
   while the *same* drive from the Roborock app does — manual drive rides the robot's **blocked input
   topic** (the same wall as settings / wall-edit writes). Kept as an honestly-labelled RE artifact; the
   way forward is a MITM of the app's drive frames. See [CAPABILITIES.md](CAPABILITIES.md) (Manual drive).
+  *(overturned in 0.1.2 — the string-key COMMON form works)*
 - **`raw --common`** — wrap a data-point as `COMMON{DP: value}` (the robot's input channel the library
   uses for `REMOTE`) instead of a bare `command.send(DP, value)`. A write-path probe: it confirmed that
   COMMON-wrapping does **not** land a write the bare send misses (settings and `START_BACK` all stayed put).
@@ -101,9 +145,9 @@ accuracy/readability pass.
 - **The write path is now mapped per-DP across the whole settings surface.** At the time, every *reportable* stored
   preference appeared not to stick from the CLI (MQTT writes ignored, bare or COMMON-wrapped), while runtime
   cleaning params incl. `CLEAN_COUNT` were settable. `CAPABILITIES.md` / `DP_DICTIONARY.md` updated DP-by-DP.
-  *(Later overturned — those prefs ARE settable via the string-key COMMON envelope; see [Unreleased].)*
+  *(Later overturned — those prefs ARE settable via the string-key COMMON envelope; see [0.1.2].)*
 - **`STOP` promoted to validated ✅** — halts an active clean if caught before it commits to docking.
-- **Manual drive reclassified to 🔴 app-only** (see Added). The four structured action DPs
+- **Manual drive reclassified to 🔴 app-only** (see Added) *(overturned in 0.1.2 — the string-key COMMON form works)*. The four structured action DPs
   (`TASK_CANCEL_IN_MOTION` / `JUMP_SCAN` / `GROUND_CLEAN` / `BEAK_CLEAN`) and `START_BACK` are no-ops via a
   bare send.
 - New observations: `STATUS=2`=sleeping; `FAULT 556`=relocalize-failure (the physical trigger is left as an
@@ -180,7 +224,7 @@ First public release — the reverse-engineering reference + CLI for the Roboroc
   cheap restart) — but **135 cool-down recovery** is still unproven; `--force` one-shot remains the fallback.
 - One fault-free complete physical room clean is still pending (a supervised run reached the room but the
   robot trapped on the return and needed a manual reset). *(Reframed post-0.1.0: the recurring doorway `501`
-  is the apartment's fixed, unchangeable sill — environmental, not a project goal. See Unreleased.)*
+  is the apartment's fixed, unchangeable sill — environmental, not a project goal.)*
 - `history` parser is written, but the live `op:list` **request** path returns nothing yet — pending.
 
 ### Notes

@@ -8,7 +8,7 @@
 # The `vac` console script also installs onto the correct interpreter, retiring the
 # hardcoded-shebang fragility for installed users (`./vac.py` still works as before).
 #
-# Version 0.1.1 (see CHANGELOG.md).
+# Version 0.1.3 (see CHANGELOG.md).
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -16,7 +16,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roborock-q10-cli"
-version = "0.1.2"
+version = "0.1.3"
 description = "Unofficial CLI + reverse-engineered protocol reference for the Roborock Q10 (B01) cloud protocol"
 readme = "README.md"
 requires-python = ">=3.11"

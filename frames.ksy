@@ -10,7 +10,7 @@ doc: |
   roborock.vacuum.ss07) streams over MQTT while cleaning. HEADERS ONLY — Kaitai has no native LZ4,
   so the grid body is left raw (decompress externally to declared_size bytes).
 
-  As of 2026-06-16 · firmware 03.11.24. Per-field confidence is in each `doc:`
+  As of 2026-06-22 · firmware 03.11.24. Per-field confidence is in each `doc:`
   (✅ confirmed / 🟡 plausible / ⬜ unknown). NOT a vendor spec. To verify against YOUR device, drop a
   captured frame's raw bytes into https://ide.kaitai.io/ . Context + open questions: PROTOCOL.md.
   Corrections/contradictions welcome.
@@ -18,20 +18,24 @@ seq:
   - id: sub_type
     type: u2
     enum: sub
-    doc: "0101 = room/occupancy grid; 0201 = cleaning path. ✅"
+    doc: "0101 = room/occupancy grid; 0201 = cleaning path; 0301 = full-map alternate/master grid layer (same codec as 0101); 0401 = per-room sub-grids (small bounding boxes, same codec). ✅"
   - id: body
     type:
       switch-on: sub_type
       cases:
         'sub::grid': grid_header
         'sub::path': path_header
+        'sub::grid_alt': grid_header
+        'sub::grid_room': grid_header
 enums:
   sub:
     0x0101: grid
     0x0201: path
+    0x0301: grid_alt
+    0x0401: grid_room
 types:
   grid_header:
-    doc: "29-byte header then an LZ4 block. Bytes 0-1 (the sub_type) are consumed above."
+    doc: "Header then an LZ4 block. Bytes 0-1 (the sub_type) are consumed above. Used by 0101 (room/occupancy grid), 0301 (full-map alternate/master layer), and 0401 (per-room sub-grids) — all share the identical codec. ✅"
     seq:
       - id: map_id
         size: 4
@@ -49,14 +53,27 @@ types:
       - id: height
         type: u2
         doc: "Grid height in pixels. ✅ (same verification)."
-      - id: unknown_11_24
-        size: 14
-        doc: |
-          UNKNOWN header block (raw[11:25]). Observed sub-structure (🟡): [11]=0x04 (steady state;
-          0x00/0x02 in the first few tiny build frames); [12:14]=0x6901 const per map; [14] tracks ~10*H;
-          [15]=0; [16]=0x05 const; [17]=session/mode flag;
-          [18:22]=per-frame scan-progress counter; [22]=per-frame; [23:25]=0. NO bounding-box/origin is
-          present here (exhaustive search) — the map origin is NOT transmitted in the 301 stream.
+      - id: x_min
+        type: s2
+        doc: "Map origin X in map-units (divide by 10). Per-map constant; differs across maps. ✅ decode_map.py reads it via origin_from_header() — transform oy = -2*x_min (header map-units = 5mm = 2 path-units); auto-fit is the fallback."
+      - id: y_min
+        type: s2
+        doc: "Map origin Y in map-units (divide by 10). Per-map constant; differs across maps. ✅ Read with x_min: ox = 2*y_min."
+      - id: resolution
+        type: u2
+        doc: "Grid resolution u16 BE, divide by 100 to get m/px. Always 5 -> 0.05 m/px = 50 mm/px. ✅"
+      - id: charge_x
+        type: u2
+        doc: "Dock/charger X in map-units (divide by 10, then subtract x_min for origin-relative position). ✅"
+      - id: charge_y
+        type: u2
+        doc: "Dock/charger Y in map-units (divide by 10). ✅"
+      - id: charge_phi
+        type: s2
+        doc: "Dock heading in degrees (negate the raw value). ✅"
+      - id: declared_size_high
+        type: u2
+        doc: "High u16 of a u32 declared-size field; observed always 0x0000. Low u16 follows as declared_size. 🟡"
       - id: declared_size
         type: u2
         doc: "Decompressed size = width*height + trailing room-record overhead. ✅"
@@ -69,29 +86,41 @@ types:
           LZ4-compressed occupancy grid (decompress externally). Decoded: pixel//4 = room_id, 243 = outside,
           249 = wall; followed by room-name records. ✅
   path_header:
-    doc: "16-byte header (incl. the 2-byte sub_type) then BE int16 (x,y) path-unit pairs (≈2.5 mm/unit, not true mm) to end-of-frame."
+    doc: |
+      14-byte header (incl. the 2-byte sub_type) then BE int16 (x,y) path-unit pairs (≈2.5 mm/unit, not true
+      mm) to end-of-frame. Raw pose extraction starts at byte 14 (point_count is then EXACT — verified 850/850
+      frames across 10 captures). NOTE: the clean-render georef pipeline instead reads from byte 16 (a 1-int16
+      offset an x↔y swap cancels); that offset is a renderer choice, not the frame structure.
     seq:
-      - id: unknown_02
-        type: u1
-        doc: "UNKNOWN sub-header byte. ⬜"
-      - id: clean_counter
-        type: u1
-        doc: "Per-clean counter (0x08 and 0x11 eras both observed); NOT a structure flag. 🟡"
-      - id: unknown_04_07
+      - id: path_epoch
+        type: u2
+        doc: |
+          Path-epoch counter: resets on power-cycle, +1 per new traversal (undock / relocalize / clean-start);
+          a skip >1 ⇒ the robot moved while uncaptured. ✅ (The old "byte-3 clean_counter" 0x08/0x11 were just
+          the low byte of this u16 at epochs 8/17.)
+      - id: const_04_07
         size: 4
-        doc: "UNKNOWN. ⬜"
+        doc: "Constant 0x00020000 across 3,440 captured path frames. ✅ Semantics unnamed."
       - id: point_count
         type: u2
-        doc: "Declared number of path points. ✅"
-      - id: unknown_10_15
-        size: 6
-        doc: "UNKNOWN header tail (completes the 16-byte header). ⬜"
+        doc: "Number of path points. ✅ (== actual (x,y) pairs when parsing from byte 14; reads one higher only against the byte-16 render offset.)"
+      - id: heading_deg
+        type: s2
+        doc: |
+          Live firmware SLAM heading, DEGREES (0=+x, +90=+y, ±180=−x, −90=−y). ✅ This header field IS the
+          "missing heading DP". Accuracy: drive-mode 1–2° (long straight runs); teleop 8.7° mae; clean-mode
+          per-frame is NOISY (~18–52°, capture-dependent) — NOT a tight regime. A localization loss (FAULT 556)
+          snaps it to 0° with the pose at ≈(0,0). NB the official app does NOT read this field — it recomputes
+          heading from path geometry; we use the firmware field directly for closed-loop nav.
+      - id: const_12_13
+        type: u2
+        doc: "Constant 0x0000 across 3,440 captured path frames. ✅ Semantics unnamed."
       - id: points
         type: point
         repeat: eos
         doc: |
-          Cleaning path: last point = current robot position, first ≈ dock. OPEN (⬜): 0x11+ firmware
-          prepends a spurious sentinel ~(0,-1907) outside the map — strip via a gross-outlier test on pts[0].
+          Cleaning path: last point = current robot position, first ≈ dock. OPEN (⬜): some dock-rooted cleans
+          prepend a spurious ≈map-origin sentinel ~(0,-1907) — strip via a gross-outlier test on pts[0].
   point:
     seq:
       - id: x

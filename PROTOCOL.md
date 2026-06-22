@@ -1,7 +1,7 @@
 # Roborock Q10 (B01) cloud protocol — reverse-engineering reference
 
-> **As of:** 2026-06-19 · **Hardware:** Roborock Q10 S5+ (`roborock.vacuum.ss07`, B01 protocol), firmware
-> **03.11.24** · **Stack:** `python-roborock` 5.14.2, Python 3.11 · **Method:** on-device HTTPS proxy +
+> **As of:** 2026-06-22 · **Hardware:** Roborock Q10 S5+ (`roborock.vacuum.ss07`, B01 protocol), firmware
+> **03.11.24** · **Stack:** `python-roborock` 5.14.2 (locked; upstream now 5.20.x), Python 3.11 · **Method:** on-device HTTPS proxy +
 > single-connection MQTT tap, then **observing the app's own traffic in an Android emulator** that unlocked the
 > write surface — see [Method & provenance](#method--provenance).
 >
@@ -46,7 +46,7 @@ If you're implementing a B01 client in another language, start here — the reus
    CLI had been sending an enum-member key. → [Capabilities](CAPABILITIES.md) · [Data points](DP_DICTIONARY.md)
 2. **Hawk *body*-signing unlocks `/jobs` writes.** Body-bearing POST/PUT must sign `md5(compact-JSON body)` (GET signs
    the path only) **and** send those exact bytes — the fix for schedules and one-time room cleans.
-   → [Authentication](#authentication--hawk-and-the-write-path-body-signing) (filed upstream as #849)
+   → [Authentication](#authentication--hawk-and-the-write-path-body-signing) (fixed upstream: PR #852, released 5.15.2)
 3. **Hold ONE MQTT connection to dodge the account-level `135` lockout.** A fresh session per command trips a
    rate-limit that knocks out the phone app too; one long-lived connection (the daemon) sidesteps it.
    → [Transport](#transport)
@@ -109,7 +109,7 @@ read-only tap needs no network interception: you already own the topic your own 
 REST requests are **Hawk**-signed. The pre-string is seven colon-joined fields; the last is the **payload-hash
 slot**. GET signs it empty (works); **body-bearing writes (POST/PUT) to `/jobs` must put `md5(compact-JSON
 body)` there, and must SEND those exact compact bytes** — re-serialization with spaces breaks the MAC → `401`.
-This is the body-signing rule for writes (schedules, room cleans). ✅ Filed upstream as [python-roborock#849](https://github.com/Python-roborock/python-roborock/issues/849).
+This is the body-signing rule for writes (schedules, room cleans). ✅ Fixed upstream in [PR #852](https://github.com/Python-roborock/python-roborock/pull/852) (released in `python-roborock` 5.15.2); issue #849 closed.
 GET and `DELETE /jobs/{id}` (no body) are unaffected.
 
 ```
@@ -156,10 +156,8 @@ Two sub-types, by the first 2 header bytes.
   BE u16); `pixel//4=room_id`, `243`=outside, `249`=wall; trailing
   room-name records. ✅ Header byte `[6]` is a **map-segmented/finalized flag** (`0` while
   building, `1` once rooms exist). 🟡
-- **`0201` — cleaning path.** BE int16 `(x,y)` **path-unit** pairs (≈2.5 mm/unit) after a 16-byte header; last point = robot position. ✅
-- **Georeference** (path-units → grid pixel, ≈50 mm/px): the origin is **not transmitted**; we **auto-fit** it per capture
-  (it's stable per home, anchored top-right, grows left/down). ✅ Others use manual-tune
-  calibration. ❓ python-roborock PR #848 draft attempts an auto-fit too.
+- **`0201` — cleaning path + live heading.** BE int16 `(x,y)` **path-unit** pairs (≈2.5 mm/unit) after a 14-byte header (raw pose; the clean-render georef uses 16 — see FRAME_ANATOMY); last point = robot position. The header also carries the **live SLAM heading** (`b[10:12]`, i16°: 0=+x/+90=+y/±180=−x/−90=−y) + a path-epoch counter (`b[2:4]`). Streams during a clean **or on demand** — any client sending DP-110 `HEARTBEAT` polls it (incl. manual teleop, no rig). ✅
+- **Georeference** (path-units → grid pixel, ≈50 mm/px): the map origin **IS transmitted** in the `0101` header — `x_min`/`y_min` at bytes 11–14 (**raw BE, 5 mm units = 2 path-units**); resolution at 15–16 (always 5 = 50 mm/px); dock coords at 17–22. ✅ `decode_map.py` reads the origin straight from the header (`origin_from_header`, transform `ox = 2·y_min`, `oy = −2·x_min` — the raw ×2); **auto-fit is retained only as a fallback / cross-check** (on-floor parity with the header origin, 29/31 captures) ✅ — others use manual-tune calibration. ❓ python-roborock PR #848 draft attempts an auto-fit too.
 
 ## Capabilities
 
@@ -172,16 +170,21 @@ string-key COMMON (a few — `BREAKPOINT_CLEAN`/`MAP_SAVE_SWITCH` — aren't). M
 
 Where we're uncertain or others disagree — **the high-value targets for anyone extending this** (data to test
 against in the seed corpus, when published):
-- **No-mop zone type code:** we observe **`0x02`** (ground-truthed); python-roborock PR #850
-  reports **`0x03`**. Unresolved — possibly per-firmware or sub-types. ⬜ ❓ *Context (Reported):* the RRMapFile
-  **file** format (marcelrv/XiaomiRobotVacuumProtocol) numbers these as separate *blocks* — no-go=9, virtual
-  walls=10, no-mop=12 — a different encoding from the B01 **MQTT DP** `RESTRICTED_ZONE_UP` types, which is one
-  reason type numbers don't cross-map cleanly between projects. Reconcile by comparing raw captures across homes.
-- **Map origin in the cloud channel:** not in the 301 stream; may live in the on-demand map RPC / 102-JSON. ⬜
+- ~~**No-mop zone type code (`0x02` vs `0x03`)**~~ — **✅ RESOLVED:** these are **not competing values for one type** —
+  they are **two distinct zone types** in the `RESTRICTED_ZONE_UP` blob: **`0x02` = no-mop** (we ground-truthed it) and
+  **`0x03` = user-drawn door-threshold** (/ 2026-06-13). PR #850's original `0x03`-for-no-mop was an error; it was
+  **corrected to `0x02`=no-mop / `0x03`=threshold** (the fix shipped in python-roborock 5.18.0, credited to this project).
+  *Context (Reported):* the RRMapFile **file** format (marcelrv/XiaomiRobotVacuumProtocol) numbers restriction *blocks*
+  differently (no-go=9, virtual walls=10, no-mop=12) — a separate encoding from the B01 **MQTT DP** `RESTRICTED_ZONE_UP` types,
+  so block numbers don't cross-map between projects.
+- ~~**Map origin in the cloud channel:**~~ **RESOLVED (independently verified):** the origin IS in the `0101` 301-stream header at bytes 11–14 (`x_min`/`y_min`, **raw BE, 5 mm units = 2 path-units**). `decode_map.py` reads it from the header (`origin_from_header`, transform `ox = 2·y_min`, `oy = −2·x_min`); auto-fit is now the fallback. ✅
 - ~~**`CLEAN_RECORD` live-pull trigger**~~ — **RESOLVED :** our own `op:list` returns the back-catalog
   (25 records) via string-key COMMON; no MITM needed. ✅
 - **Unexplained DPs** seen on the `novel` tap but never decoded. ⬜
-- The anomalous path `pts[0]` sentinel `(0,−1907)` (0x11+ firmware) — band-aided, intent unknown. ⬜
+- The anomalous path `pts[0]` sentinel — **CHARACTERIZED 2026-06-21:** a constant **≈map-origin** leading point (value tracks
+  the map origin — `(1,0)` / `~(0,−1907)` by map), present on some dock-rooted full cleans but **absent in map-builds + all
+  teleop**; **both decoders already handle it** (`decode_map` strips it; `pose_extract` uses the last point) and it reconciles
+  with the upstream PoC's offset-18. Exact per-frame trigger still unpinned (cosmetic). 🟡
 
 ## Method & provenance
 

@@ -38,7 +38,7 @@ while a clean is in progress (the room **grid** renders any time, even docked). 
 <b><a href="FRAME_ANATOMY.md">Decoding the map stream — read the frame anatomy →</a></b><br><br>
 The Q10 streams its map as binary <b>protocol-301</b> frames. We decode the room grid and the robot's
 path, and have reverse-engineered <b>most</b> of the frame header byte-by-byte (including a newly-found
-map-finalized flag) — a few bytes, and where the map's origin lives, are still open questions.<br><br>
+map-finalized flag and the map origin fields at bytes 11–14). The decoder reads the map origin straight from the header — auto-fit is now just a fallback.<br><br>
 <a href="FRAME_ANATOMY.md"><img src="assets/frame_layout.svg" width="440" alt="0101 grid and 0201 path byte layouts"></a>
 </td>
 </tr>
@@ -65,7 +65,7 @@ account you can't afford to disrupt.
 |---|---|
 | Model | Roborock Q10 S5+ (`roborock.vacuum.ss07`, B01 protocol) |
 | Firmware | **last validated against 03.11.24** (2026-06) |
-| Python | 3.11 (3.11+ required) · `python-roborock` 5.14.x |
+| Python | 3.11 (3.11+ required) · `python-roborock` 5.14.2 (locked; upstream now 5.20.x) |
 
 Other Roborock models are **untested** — they may share the B01 protocol (in which case much of this
 should work) or differ. Reports from other models are welcome ([CONTRIBUTING.md](CONTRIBUTING.md)).
@@ -179,14 +179,26 @@ Capture & decode (the reverse-engineering surface):
 Multiple robots? Add `--device <duid>` (DUIDs via `./vac.py discover`). Most B01 commands are
 fire-and-forget (no response body); `raw` is the escape hatch for features without a dedicated command.
 
+## Autonomy layer (experimental)
+
+Separate from the CLI, a small standalone toolset builds *on top of* the same cloud-MQTT comms to do
+things the robot exposes no native command for — heading-aware **go-to** (`nav.py`), **on-demand lidar**
+snapshots (`scan.py` — no clean, no motion), live **pose + SLAM-heading** readout
+(`pose_extract.py` / `pose_monitor.py`), and a lost→remap→**recover** flow (`recover.py`). It's kept
+deliberately *out* of `vac.py` (a candidate for its own sister project).
+
+> ⚠️ **Experimental** — newer and less battle-tested than the CLI; interfaces may change. `nav.py` /
+> `recover.py` **move the robot with no AI/laser obstacle avoidance** (hardware bumper/cliff failsafes
+> under `REMOTE` are unverified) — supervise every run, clear the area, and keep it away from stairs/drop-offs.
+
+What each tool does, validated metrics, and what's still gated → **[AUTONOMY.md](AUTONOMY.md)**.
+
 ## Known limitations
 
 - **Cloud-only.** No local control for this model (B01 protocol).
 - **Map.** `vac.py map` renders the room grid (colour-coded, room-name-labeled). The grid streams
   even while docked; the cleaning path + live position stream during a clean (and other active navigation). Georeference:
-  grid dimensions come from the frame header, and the path↔grid origin (not transmitted in the stream)
-  is auto-fit per capture → `map_overlay.png`. Obstacles are cloud-only (not in this data) — the
-  library exposes none of this natively.
+  grid dimensions and the map origin are read straight from the frame header (origin at bytes 11–14, `x_min`/`y_min`, verified) → `map_overlay.png` (auto-fit is retained only as a fallback). Obstacles are cloud-only (not in this data) — the library exposes none of this natively.
 - **Room cleaning** (`clean-rooms`) has two paths. **`--mqtt`** runs an **instant** MQTT segment-clean
   (no Hawk; each room cleans with its *saved* fan/water/mode) — the direct way to clean specific rooms now.
   The default posts a one-time REST `/jobs` job that fires **~2 min later**, but it carries per-job
@@ -215,15 +227,14 @@ output via `decode_map.py --json` — so a status panel or web UI can consume th
 The highlights:
 
 - **The B01 map format** — the room grid is LZ4-compressed; path/position arrive as protocol-301
-  frames. Decoded end-to-end into a labeled floor plan — grid dimensions read from the frame header,
-  and the path↔grid registration auto-fit per map (the origin isn't transmitted in the stream).
+  frames. Decoded end-to-end into a labeled floor plan — grid dimensions and the map origin (bytes 11–14, verified ✅) read straight from the frame header; auto-fit is retained only as a fallback.
   *(Not a sole source: python-roborock [PR #848] is converging on a similar auto-fit solve — read this
   as an independent, dated corroboration, with the provenance write-up as the durable part.)*
   → [FRAME_ANATOMY.md](FRAME_ANATOMY.md), [PROTOCOL.md](PROTOCOL.md), [`decode_map.py`](decode_map.py)
 - **The cloud write path** — schedule writes (and one-time `/jobs` room cleans) go through a REST `/jobs` call that needs
   **Hawk *body* signing**; getting that wrong looks exactly like "writes don't work / token scope,"
-  but it isn't. This one appears to be **not publicly documented, to our knowledge** (filed upstream as
-  [issue #849], unmerged). → [PROTOCOL.md](PROTOCOL.md)
+  but it isn't. This one wasn't publicly documented when we hit it; we filed [issue #849] and the fix
+  **shipped upstream as PR #852** (`python-roborock` 5.15.2) — our first contribution. → [PROTOCOL.md](PROTOCOL.md)
 - **A single-connection daemon** — one held MQTT connection serving every command, to stay under the
   account-level `135` rate-limit that otherwise locks out the CLI *and* the app. *(As upstream gains
   held-connection / MQTT segment-clean paths, the practical edge narrows; the documented 135-avoidance
@@ -232,11 +243,13 @@ The highlights:
   the library catalog; **~66** ever seen across all sessions; ~19 surfaced in `status`). → [DP_DICTIONARY.md](DP_DICTIONARY.md)
 
 **How this relates to upstream.** Basic Q10 control/status/sensors are already in `python-roborock` +
-Home Assistant core, and map/georef/wall-zone decode is **actively converging in open python-roborock
-PRs** ([#847], [#848], [#850], [#851]). The decode/map parts here overlap that work — a dated, independent
-take on the same ground. The parts least covered elsewhere are the **confidence-tagged protocol reference** and the
-**Hawk `/jobs` body-signing** finding; we've filed what we can upstream, and hope the reference is useful to anyone
-building on B01.
+Home Assistant core, and map/georef/wall-zone decode is **converging fast in python-roborock** — community
+PRs [#847] (merged) + [#848]/[#851] (open), alongside our own contributions that shipped: the **Hawk `/jobs`
+body-signing** fix (our PR [#852], 5.15.2) and a **Q10 zone type-2/3** type-code correction to community PR [#850] (5.18.0).
+The decode/map parts here overlap that work — a dated, independent take on the same ground. What's least
+covered elsewhere: the **confidence-tagged protocol reference**, the **firmware SLAM heading** (`0201`
+offset-10), and the **closed-loop nav** built on it. We've upstreamed what fits the library and hope the
+reference is useful to anyone building on B01.
 
 What's been verified vs. still open is scoped in [CAPABILITIES.md](CAPABILITIES.md) (can / can't /
 unknown).
