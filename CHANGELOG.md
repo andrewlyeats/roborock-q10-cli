@@ -5,6 +5,39 @@ Notable changes to this project. Format loosely follows
 undocumented cloud protocol and relies on `python-roborock` internals, each release notes the
 environment it was **validated against** — check that before trusting it on a newer stack.
 
+## [0.1.4] — 2026-06-23 — reusable map renderer + settled path↔grid registration; doc/spec corrections
+
+Same stack (Q10 S5+, firmware **03.11.24**, `python-roborock` **5.14.2** — locked; upstream is now 5.20.x).
+Adds a reusable annotated-map renderer, settles the path↔grid registration with a fit fallback, and
+corrects several reference docs (and the `.ksy`).
+
+### Added
+- **`map_render.py`** — a reusable annotated-map renderer (module + CLI) built on `decode_map.py`. Two
+  styles: `decode` (the room + path/DP-overlay PNGs `decode_map` already produces) and a new **true-scale
+  XY plot** in path-units — labelled axes, occupancy walls/rooms, the cleaning path, the header origin, a
+  heading arrow at the robot's current pose, dock/robot markers, optional sample points. PIL-only; outputs
+  are gitignored (they reveal the home floorplan).
+- **`decode_map.path_to_pixel(x, y, …)`** — the canonical true-pose→grid-cell mapping
+  (`col=(x−oy)//res`, `row=(ox−y)//res`; same form as upstream `GridCalibration.world_to_pixel`), so
+  pose-on-grid is defined once. `coord_to_pixel` remains the render/app-orientation pair for the byte-16 path.
+- **`decode_map.fit_registration(…)`** — a conservative orientation+origin fit fallback (the 8 axis-aligned
+  orientations × translation, resolution fixed at the read 50 mm/px), used only when the read header-standard
+  lands few path points on floor (an unseen home / firmware / re-oriented map). Mirrors upstream
+  `solve_calibration`; the standard registration is otherwise the deterministic default.
+
+### Corrected / clarified
+- **`frames.ksy`** — the `0101` origin fields (`x_min`/`y_min`/`charge_*`) said "divide by 10", contradicting
+  the validated `×2` transform in the same file (a literal /10 yields a badly wrong origin); fixed to "raw
+   in 5-mm header-units → ×2 = path-units". Dropped an inaccurate byte-16 "an x↔y swap cancels" aside (the
+  byte-16 read is a render-path legacy, not frame structure) and corrected the stray-leading-point example.
+- **Path-decode docs** (FRAME_ANATOMY / PROTOCOL / DP_DICTIONARY) reframed to state the protocol plainly:
+  path points are `(x, y)` int16 pairs at **byte 14**, one georef orientation; the byte-16 read is a
+  render-path legacy flagged for refactor. The genuine **stray leading point** (some autonomous dock-rooted
+  cleans prepend one ≈map-origin point; absent on teleop/heartbeat and map-builds) is documented as real.
+
+### Environment / validation
+- Decode output unchanged — `decode_map`'s room/overlay PNGs are byte-identical. Offline tests green.
+
 ## [0.1.3] — 2026-06-22 — autonomy layer (experimental), map origin from the header, live SLAM heading
 
 Same stack (Q10 S5+, firmware **03.11.24**, `python-roborock` **5.14.2** — locked; upstream is now 5.20.x).

@@ -52,7 +52,10 @@ If you're implementing a B01 client in another language, start here — the reus
    → [Transport](#transport)
 4. **The live map/path is a spontaneous binary MQTT protocol-301 stream.** `0101` = LZ4 occupancy grid
    (`pixel // 4 = room_id`) + trailing room-name records; `0201` = the cleaning path; zone/wall coords are
-   **~5 mm/unit**. → [Map frames](#map-frames-protocol-301) · [Frame anatomy](FRAME_ANATOMY.md)
+   **~5 mm/unit** (both zone AND wall store the path-Y axis first — transposed vs the `0201` path frame; the parsers'
+   `(y,x)`/`(x,y)` labels are a naming quirk, not an axis difference — see [DP_DICTIONARY](DP_DICTIONARY.md)
+   "Overlay-render axis"; ground-truthed predictively on the emulator 2026-06-23).
+   → [Map frames](#map-frames-protocol-301) · [Frame anatomy](FRAME_ANATOMY.md)
 5. **Live clean-history pulls work** — `COMMON{"52":{"op":"list"}}` returns the record list; the old "app/push-only"
    verdict was the same wrong-key envelope. → [Data points](DP_DICTIONARY.md)
 
@@ -158,6 +161,7 @@ Two sub-types, by the first 2 header bytes.
   building, `1` once rooms exist). 🟡
 - **`0201` — cleaning path + live heading.** BE int16 `(x,y)` **path-unit** pairs (≈2.5 mm/unit) after a 14-byte header (raw pose; the clean-render georef uses 16 — see FRAME_ANATOMY); last point = robot position. The header also carries the **live SLAM heading** (`b[10:12]`, i16°: 0=+x/+90=+y/±180=−x/−90=−y) + a path-epoch counter (`b[2:4]`). Streams during a clean **or on demand** — any client sending DP-110 `HEARTBEAT` polls it (incl. manual teleop, no rig). ✅
 - **Georeference** (path-units → grid pixel, ≈50 mm/px): the map origin **IS transmitted** in the `0101` header — `x_min`/`y_min` at bytes 11–14 (**raw BE, 5 mm units = 2 path-units**); resolution at 15–16 (always 5 = 50 mm/px); dock coords at 17–22. ✅ `decode_map.py` reads the origin straight from the header (`origin_from_header`, transform `ox = 2·y_min`, `oy = −2·x_min` — the raw ×2); **auto-fit is retained only as a fallback / cross-check** (on-floor parity with the header origin, 29/31 captures) ✅ — others use manual-tune calibration. ❓ python-roborock PR #848 draft attempts an auto-fit too.
+  - **Path→pixel convention** (detail in [FRAME_ANATOMY](FRAME_ANATOMY.md) §9): for the **TRUE byte-14 pose**, `col = (x − oy)//res`, `row = (ox − y)//res` — column from x, row from y inverted (`decode_map.path_to_pixel`; same form as upstream `GridCalibration.world_to_pixel`). `decode_map.coord_to_pixel` (column from y) is the **app-display orientation**, paired with the byte-16 render coords the overlay uses — place a true pose with `path_to_pixel`, not it. **Orientation is a validated convention, not a read field** — corpus-invariant (3,726/3,726 single-map frames; deviations only across a map reset), but no header byte encodes it. So tooling defaults to the read header-standard and **fits orientation+origin by on-floor** only when that fails (`decode_map.fit_registration`, ≈ upstream `solve_calibration`); a per-run self-check flags any map it can't register. *(Q10 grid is top-down / no vertical flip, unlike V1/Q7.)*
 
 ## Capabilities
 

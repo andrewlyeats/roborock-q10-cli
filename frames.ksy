@@ -55,19 +55,19 @@ types:
         doc: "Grid height in pixels. ✅ (same verification)."
       - id: x_min
         type: s2
-        doc: "Map origin X in map-units (divide by 10). Per-map constant; differs across maps. ✅ decode_map.py reads it via origin_from_header() — transform oy = -2*x_min (header map-units = 5mm = 2 path-units); auto-fit is the fallback."
+        doc: "Map origin X, raw s16 BE in 5-mm header-units (= 2 path-units each). Per-map constant; differs across maps. ✅ decode_map.py reads it via origin_from_header(): oy = -2*x_min (multiply the RAW s16 by 2 → path-units). NOT divide-by-10 — the validated transform multiplies by 2, so a literal /10 gives a badly wrong origin. Auto-fit is the fallback."
       - id: y_min
         type: s2
-        doc: "Map origin Y in map-units (divide by 10). Per-map constant; differs across maps. ✅ Read with x_min: ox = 2*y_min."
+        doc: "Map origin Y, raw s16 BE in 5-mm header-units (= 2 path-units each). Per-map constant; differs across maps. ✅ Read with x_min: ox = 2*y_min (raw s16 ×2 → path-units)."
       - id: resolution
         type: u2
         doc: "Grid resolution u16 BE, divide by 100 to get m/px. Always 5 -> 0.05 m/px = 50 mm/px. ✅"
       - id: charge_x
         type: u2
-        doc: "Dock/charger X in map-units (divide by 10, then subtract x_min for origin-relative position). ✅"
+        doc: "Dock/charger X in header coordinate units (same 5-mm scale as x_min/y_min; subtract x_min for origin-relative position). ✅"
       - id: charge_y
         type: u2
-        doc: "Dock/charger Y in map-units (divide by 10). ✅"
+        doc: "Dock/charger Y in header coordinate units (same 5-mm scale as x_min/y_min). ✅"
       - id: charge_phi
         type: s2
         doc: "Dock heading in degrees (negate the raw value). ✅"
@@ -89,8 +89,8 @@ types:
     doc: |
       14-byte header (incl. the 2-byte sub_type) then BE int16 (x,y) path-unit pairs (≈2.5 mm/unit, not true
       mm) to end-of-frame. Raw pose extraction starts at byte 14 (point_count is then EXACT — verified 850/850
-      frames across 10 captures). NOTE: the clean-render georef pipeline instead reads from byte 16 (a 1-int16
-      offset an x↔y swap cancels); that offset is a renderer choice, not the frame structure.
+      frames across 10 captures). NOTE: decode_map.py's render pipeline instead reads from byte 16 (a render-path
+      legacy, flagged for refactor); that offset is a renderer choice, not the frame structure.
     seq:
       - id: path_epoch
         type: u2
@@ -119,8 +119,9 @@ types:
         type: point
         repeat: eos
         doc: |
-          Cleaning path: last point = current robot position, first ≈ dock. OPEN (⬜): some dock-rooted cleans
-          prepend a spurious ≈map-origin sentinel ~(0,-1907) — strip via a gross-outlier test on pts[0].
+          Cleaning path: last point = current robot position, first ≈ dock. Some autonomous dock-rooted cleans
+          prepend one stray leading point ≈ the map origin (e.g. (-3,0)); strip via a gross-outlier test on
+          pts[0]. Absent on teleop/heartbeat and map-builds. OPEN (⬜): what triggers it.
   point:
     seq:
       - id: x

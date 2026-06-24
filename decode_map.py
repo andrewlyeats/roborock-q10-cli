@@ -108,31 +108,17 @@ def load_frames(path, sig):
 # ── path (0201) ────────────────────────────────────────────────────────────────
 
 def parse_path(raw):
-    """Return (points, declared_count). BE int16 (x,y) pairs; the header is 14 bytes + `count`
-    pairs (count-consistent: (len-14)/4 == count on every capture we have).
+    """Return (points, declared_count). BE int16 (x,y) path-unit pairs.
 
-    WORKAROUND, not a full resolution (s28 — corrected after an earlier overclaim). What's
-    verified: SOME cleans prepend a BOGUS leading point ~(0,-1900) (counted in `count`); others
-    don't. It is NOT a firmware "era" (firmware is constant 03.11.24) and NOT an extra header word
-    — byte[3] is a per-clean COUNTER, not a version (it increments within a single capture). Present
-    in the s23/s24/s26 cleans, absent in map_probe/s27.
+    Points truly start at **byte 14** (`pose_extract.py`; verified exact, 850/850 teleop frames). This
+    renderer reads from **byte 16** — a render-path legacy (the count then reads one high), kept because
+    the overlay's `coord_to_pixel`/`render_path_svg` are matched to it. FLAGGED FOR REFACTOR to byte 14 +
+    `path_to_pixel`.
 
-    What we do here is deliberate but unprincipled: read at offset 16 (a one-int16 SHEAR of the true
-    offset-14 coords) and let `_drop_path_outlier` strip the bogus point when present. The shear ≈ a
-    transpose that the render-time x<->y swap (render_path_svg) + the grid `col=y,row=x` convention
-    happen to undo — so maps render at 99.8-100% on all 6 captures. Robust, but a lucky cancellation.
-    (Tested s28: parsing the "true" offset-14/18 coords needs a per-clean axis convention and fits
-    *worse* on s24 — 99.65% vs this workaround's 99.88% — so this stays the more uniform choice.)
-
-    OPEN QUESTION for future RE (do NOT call this resolved): what TRIGGERS the bogus leading point?
-    Leads — longer/multi-segment cleans (→ higher byte[3]), or map type (s23/s24/s26 were the
-    multi-map-build window). Settle it with a targeted capture: short vs long/resumed clean, original
-    vs freshly-built map, and check whether the sentinel appears. See PROTOCOL s28.
-    NEW DATA (2026-06-20): teleop `0201` frames (heartbeat-driven — pose_hb1/hb4) carry NO sentinel —
-    `count` matches the real points exactly (a count=1 frame holds one true (x,y) at bytes 14-17,
-    confirming the offset-14 layout directly). So the sentinel is a CLEAN-mode artifact, not a property
-    of the 0201 format → narrows the trigger to autonomous-clean path recording. `pose_extract.py`
-    reads raw pose at offset 14; this renderer keeps offset-16 + the x<->y swap as its tuned cancellation.
+    Stray leading point: SOME autonomous dock-rooted cleans prepend one extra point ≈ the map origin
+    (counted in `count`); `_drop_path_outlier` strips it. Absent on teleop/heartbeat (pose_hb1/hb4) and
+    map-builds; present in the s23/s24/s26 cleans. OPEN QUESTION (do NOT call resolved): what TRIGGERS it
+    — clean mode? resume? A targeted short-vs-long/resumed-clean capture would settle it. See PROTOCOL s28.
     """
     count = struct.unpack(">H", raw[8:10])[0]
     body = raw[16:]
@@ -355,6 +341,41 @@ def fit_origin(grid, W, H, pts, res=GRID_MM_PER_PIXEL):
     return ox, oy, res, sc / len(pts)
 
 
+# Orientation candidates for the TRUE (byte-14) pose → grid (swap, sign_c, sign_r): swap=False → col
+# from x / row from y, True → col from y / row from x; signs flip each axis. The Q10 header-standard is
+# (False, 1, -1). fit_registration searches all 8 only as a FALLBACK for an unseen orientation.
+_ORIENTATIONS = [(s, sc, sr) for s in (False, True) for sc in (1, -1) for sr in (1, -1)]
+
+
+def fit_registration(grid, W, H, pts, res=GRID_MM_PER_PIXEL):
+    """FALLBACK orientation+origin fit for the TRUE (byte-14) pose, for a map where the header-standard
+    orientation lands few path points on floor (a different home / firmware / a re-oriented map).
+
+    Searches the 8 axis-aligned orientations (swap × col-sign × row-sign) × translation (each via
+    `fit_origin`'s bbox slide). Mirrors upstream python-roborock `solve_calibration` — resolution is FIXED
+    at the read 50 mm/px (=20 path-units/px); we search orientation + offset. Returns a list of
+    `((swap, sign_c, sign_r, oc, orow, res), score)` SORTED by score desc (best first), for
+    `col=(sign_c·cval − oc)//res, row=(sign_r·rval − orow)//res` (cval,rval = x,y or y,x per swap); `[]` if
+    it can't fit. The header-standard default is `(False, 1, -1, oy, -ox, res)`. The caller must adopt a
+    fit CONSERVATIVELY (enough points + a clear margin over the runner-up — a short path slides onto a
+    floor blob in many orientations), so the common path stays the deterministic header read. See
+    FRAME_ANATOMY step 9 / PROTOCOL 2026-06-23."""
+    if len(pts) < 4:
+        return []
+    out = []
+    for swap, sc, sr in _ORIENTATIONS:
+        # Transform each true (x,y) so fit_origin's (col=(b−oy)//res, row=(ox−a)//res) realises this
+        # orientation: b = sc·cval, a = −sr·rval.  Then oc = oy_fit, orow = −ox_fit (derivation in docs).
+        tp = [((-sr * (x if swap else y)), (sc * (y if swap else x))) for x, y in pts]
+        fit = fit_origin(grid, W, H, tp, res)
+        if fit is None:
+            continue
+        ox_f, oy_f, _, score = fit
+        out.append(((swap, sc, sr, oy_f, -ox_f, res), score))
+    out.sort(key=lambda ps: ps[1], reverse=True)
+    return out
+
+
 def render_grid_png(grid, W, H, rooms, scale=3):
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (W, H), OUTSIDE)
@@ -569,12 +590,25 @@ def _mm_to_pixel(mm_y, mm_x, W, H, scale,
 
 def coord_to_pixel(path_x, path_y, W, H,
                    ox=GRID_ORIGIN_OX, oy=GRID_ORIGIN_OY, res=GRID_MM_PER_PIXEL):
-    """Convert robot mm coords (path frame) → grid (col, row). Returns None if out of bounds."""
+    """Convert RENDER-frame path coords (parse_path's byte-16 output) → grid (col, row), or None if OOB.
+
+    Convention: col←path_y, row←path_x (the app's display orientation), paired with parse_path's byte-16
+    render coords. ⚠ Do NOT feed the TRUE (byte-14 / pose_extract) pose here — use path_to_pixel()."""
     col = (path_y - oy) // res
     row = (ox - path_x) // res
     if 0 <= col < W and 0 <= row < H:
         return col, row
     return None
+
+
+def path_to_pixel(x, y, W, H, ox=GRID_ORIGIN_OX, oy=GRID_ORIGIN_OY, res=GRID_MM_PER_PIXEL):
+    """Convert a TRUE (byte-14 / pose_extract) path point (x, y) → grid (col, row), or None if OOB.
+
+    World→pixel registration: col←x, row←y inverted — `col=(x−oy)//res, row=(ox−y)//res` (a per-axis
+    scale + Y-flip). Use for the real pose frame (heading 0=+x/+90=+y): pose_extract output, nav, the XY
+    plot. Same form as upstream `GridCalibration.world_to_pixel`. (Implemented as coord_to_pixel with x,y
+    swapped, since coord_to_pixel uses the app's col←y orientation.) See FRAME_ANATOMY §9."""
+    return coord_to_pixel(y, x, W, H, ox, oy, res)
 
 
 def render_overlay_png(grid, W, H, rooms, path_pts, dp_overlay=None, scale=3,
@@ -644,29 +678,32 @@ def render_overlay_png(grid, W, H, rooms, path_pts, dp_overlay=None, scale=3,
                 draw.line([p1, p2], fill=(180, 0, 0), width=scale + 1)
 
         # No-go zones — red semi-transparent rectangles
+        # Zone/carpet points are stored as (x, y) where x=col-direction (path_y), y=row-direction (path_x).
+        # to_px(mm_y, mm_x) maps col=f(mm_y) and row=f(mm_x), so pass (p[0], p[1]) = (zone_x, zone_y).
+        # (Walls are different: parse_virtual_walls stores (path_y, path_x) directly, so to_px(y1,x1) is correct.)
         for pts in dp_overlay.get("no_go", []):
-            pxpts = [to_px(p[1], p[0]) for p in pts]
+            pxpts = [to_px(p[0], p[1]) for p in pts]
             pxpts = [p for p in pxpts if p]
             if len(pxpts) >= 2:
                 draw.polygon(pxpts, outline=(220, 30, 30), fill=None)
 
         # No-mop zones — orange rectangles
         for pts in dp_overlay.get("no_mop", []):
-            pxpts = [to_px(p[1], p[0]) for p in pts]
+            pxpts = [to_px(p[0], p[1]) for p in pts]
             pxpts = [p for p in pxpts if p]
             if len(pxpts) >= 2:
                 draw.polygon(pxpts, outline=(240, 140, 0), fill=None)
 
         # Cleaning zones — green rectangles
         for pts in dp_overlay.get("clean_zones", []):
-            pxpts = [to_px(p[1], p[0]) for p in pts]
+            pxpts = [to_px(p[0], p[1]) for p in pts]
             pxpts = [p for p in pxpts if p]
             if len(pxpts) >= 2:
                 draw.polygon(pxpts, outline=(0, 180, 60), fill=None)
 
         # Carpets — blue outlines
         for pts in dp_overlay.get("carpets", []):
-            pxpts = [to_px(p[1], p[0]) for p in pts]
+            pxpts = [to_px(p[0], p[1]) for p in pts]
             pxpts = [p for p in pxpts if p]
             if len(pxpts) >= 2:
                 draw.polygon(pxpts, outline=(30, 80, 220), fill=None)

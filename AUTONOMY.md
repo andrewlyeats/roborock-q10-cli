@@ -30,6 +30,17 @@ controller for the robot's native features); a candidate for extraction into its
 | `scan.py` · on-demand lidar | **`./scan.py`** = one-command live snapshot: heartbeat → capture → render the raw real-time `0101` grid (no cloud fetch, no clean, **no motion**). Also: `vac.py map` = saved/segmented map · `START_CLEAN {"cmd":4}` = build a NEW map (free slot via `MULTI_MAP` delete) · `decode_map.py` renders any capture | **live grid proven decodable on demand** (2026-06-21): `scan.py` rendered the study at 76×58; a moving-capture decode hit 100% georef |
 | `recover.py` | lost→remap→recover orchestrator (detect 556 → `cmd:4` rebuild → `nav.closed_loop`) | actions mechanically validated; **end-to-end needs a staged kidnap** |
 
+## Motion model (characterized 2026-06-23, with error bars)
+
+Measured against the robot's own SLAM (no external rig), one Q10/study, over a 400-trial detached batch:
+- **Forward nudge ≈ 150 mm** (unobstructed; median 152, mean 146 ± 41) — each `drive forward` is one discrete move.
+- **Turn ≈ 21.3°/nudge, SYMMETRIC L/R** (left 21.5 ± 2.3°, right 20.8 ± 2.0°; an apparent asymmetry was a measurement artifact).
+- **Command→motion latency ≈ 3.0 s** (median; floor ~1.2 s) — the hard floor on closed-loop precision.
+- **`stop` does NOT truncate a nudge**, and CLI sends are subprocess-paced (~1/s) → the robot is never in *continuous*
+  motion, so there is no clean "stopping distance." Practical consequence: the closed-loop landing floor is ~1 nudge
+  (≈38 mm with feedback); finer is not achievable on the discrete-nudge `REMOTE` interface.
+- **Heading** (`0201` offset-10): drive-mode **1–2°**, teleop **8.7°**; clean-mode per-frame is noisy (not a validation regime).
+
 ## Gated / pending (need the user, or a decision)
 
 - **Kidnap recovery demo** — a physical pick-up-and-set-down to induce a real "lost", then `recover.py`

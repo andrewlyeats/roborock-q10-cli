@@ -3,10 +3,12 @@
 .roborock_vac_cache.pkl
 *.pkl
 
-# Generated map renders (rebuilt by `vac.py map` / `decode_map.py`)
+# Generated map renders (rebuilt by `vac.py map` / `decode_map.py` / `map_render.py`)
 map_rooms.png
 map_path.svg
 map_overlay.png
+cap_render_*.png
+*_xy.png
 
 # Your own capture files (watch --raw / --out / --bytes) — may hold tokens + device PII
 *.jsonl
