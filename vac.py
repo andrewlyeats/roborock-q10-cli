@@ -197,7 +197,7 @@ STALE_AFTER_S = 90
 # vac.py opens a fresh MQTT session per invocation. Firing many commands quickly
 # (e.g. polling `status` in a loop) can trip an ACCOUNT-LEVEL connection rate-limit:
 # the broker then refuses new sessions with `code 135 Not authorized`, which also
-# knocks out the phone app until it cools off (minutes–~1h). See PROTOCOL s20 +
+# knocks out the phone app until it cools off (minutes–~1h). See PROTOCOL +
 # PROTOCOL.md. We turn that cryptic crash into a clear message, and for read-only
 # commands retry a couple of times with backoff in case it's a brief throttle.
 _THROTTLE_MSG = (
@@ -285,7 +285,7 @@ _ERROR_HINTS = {
 # A long-running daemon holds ONE python-roborock DeviceManager open and serves the
 # CLI over a Unix socket, so every command rides a single cloud connection instead
 # of a new MQTT session per invocation (which trips the account-level connect
-# throttle — see _THROTTLE_MSG / PROTOCOL s20). When the daemon is running it sets
+# throttle — see _THROTTLE_MSG / PROTOCOL). When the daemon is running it sets
 # _INJECTED_SESSION; device_session then hands every existing cmd_* that one held
 # session transparently, so command logic is shared verbatim between the daemon and
 # the standalone `--force` path. Architecture credits in CREDITS.md.
@@ -293,7 +293,7 @@ DAEMON_PROTO = 1                       # bump when the socket protocol changes
 # Escalating cool-down (seconds) between reconnect attempts after a 135 throttle, so
 # we don't hammer the broker during an active ban (which only extends it). After this
 # many consecutive failures the daemon gives up and requires a manual login — retrying
-# revoked credentials forever is just noise to the server. (PROTOCOL s21; server-view.)
+# revoked credentials forever is just noise to the server. (PROTOCOL; server-view.)
 _RECONNECT_BACKOFF = [120, 300, 900, 900, 900]
 _MAX_RECONNECTS = len(_RECONNECT_BACKOFF)
 SOCK_PATH = pathlib.Path("~/.roborock_vacd.sock").expanduser()
@@ -475,7 +475,7 @@ async def cmd_discover(duid: str | None, as_json: bool = False):
 
 
 # Empirically-decoded FAULT codes the library's B01Fault table lacks — decoded live from
-# the iOS app's human-readable pushes (see DP_DICTIONARY / PROTOCOL s22). The FAULT DP is
+# the iOS app's human-readable pushes (see DP_DICTIONARY / PROTOCOL). The FAULT DP is
 # OVERLOADED: it also carries benign lifecycle/status codes, so "non-zero" ≠ fault.
 _FAULT_OVERRIDES = {8: "robot trapped — clear obstacles"}   # firmware reports trapped as 8 (lib: 513/514)
 _FAULT_BENIGN = {400}   # 400 = "starting scheduled cleanup" — a START code, not a fault
@@ -661,18 +661,19 @@ async def cmd_consumables(duid: str | None, as_json: bool = False):
 
 
 # ── CLEAN_RECORD decode (shared: live history + --from-capture) ─────────────────
-# 12 underscore fields, field map cross-validated against an 18-record corpus (s24;
-# field-6/t1 monotonicity later confirmed across 22 records, s26): 2=dur_min, 5=area×1000,
-# 8=mode, 9=route, 10=pass, 11=ok are solid; 7=water (vacuum→0; 4=possible "custom" level);
-# 3≈0.55×dur; 6=monotonic accumulator (NOT a clean attribute → not surfaced).
-# s30 op:notify timing reconfirmed 2=dur_min = ACTIVE-cleaning minutes (= floor(active dwell)); on an
-# aborted/relocating clean it reads well below wall-clock (expected, not a bug). 5=area×1000 is order-of-
-# magnitude confirmed (home-floor ceiling); the exact ÷1000 constant awaits one app-area cross-check.
-# (A 2026-06-19 "2≠duration / area÷100" claim was retracted — it timed wall-clock on aborted cleans;
-# see reconcile-0/CONSOLIDATION_LOG.md.)
-_CR_WATER = {0: "off", 1: "low", 2: "medium", 3: "high", 4: "custom"}
-_CR_MODE  = {1: "vac_and_mop", 2: "vacuum", 3: "mop", 4: "customized"}
-_CR_ROUTE = {0: "fast", 1: "daily", 2: "fine"}
+# 12 underscore fields. ★ Field map is AUTHORITATIVE — from the ss07 app's own parser
+# (`setHoldData`, extracted 2026-06-24): 0=recordId 1=timestamp 2=cleanTime(min) 3=cleanArea(m²)
+# 4=mapLen 5=pathLen 6=virtualLen 7=cleanMode(type) 8=workMode 9=cleaningResult 10=startMethod
+# 11=collectDustCount. This SUPERSEDES the earlier positional guesses, which were misaligned from
+# field 3 on (we had pathLen÷1000 mislabeled as area, and mode/route/pass/status shifted by one).
+# cleaningResult/startMethod labels are app-switch-confirmed. cleanMode(7)=SCOPE and workMode(8)=actual-work
+# are now ★ HARDWARE-SEALED (2026-06-26): pos-7 ground-truthed vs the app's own Settings→Cleaning History scope
+# labels; pos-8 confirmed = the ACTUAL work done {1,2,3}, never 6 (6 is a CLEAN_MODE *setting*, not a record
+# value). See DP_DICTIONARY CLEAN_RECORD detail + PROTOCOL 2026-06-26.
+_CR_MODE   = {0: "full", 1: "selective_room", 3: "zone", 4: "spot"}  # cleanMode (clean SCOPE; 2 unused on ss07)
+_CR_WORK   = {1: "vac+mop", 2: "vacuum", 3: "mop"}                   # workMode (actual work done)
+_CR_RESULT = {0: "interrupted", 1: "completed", 2: "ended-early"}    # cleaningResult
+_CR_START  = {0: "remote", 1: "app", 2: "timer", 3: "button"}       # startMethod
 
 
 def _decode_clean_record(raw: str) -> dict | None:
@@ -683,13 +684,15 @@ def _decode_clean_record(raw: str) -> dict | None:
         return {
             "id": parts[0],
             "started": datetime.fromtimestamp(int(parts[1])).strftime("%Y-%m-%d %H:%M"),
-            "duration_min": int(parts[2]),
-            "area_m2": round(int(parts[5]) / 1000, 3),
-            "water": _CR_WATER.get(int(parts[7]), parts[7]),
-            "mode": _CR_MODE.get(int(parts[8]), parts[8]),
-            "route": _CR_ROUTE.get(int(parts[9]), parts[9]),
-            "passes": int(parts[10]),
-            "ok": int(parts[11]) == 1,
+            "minutes": int(parts[2]),
+            "area_m2": int(parts[3]),
+            "type": _CR_MODE.get(int(parts[7]), parts[7]),
+            "work": _CR_WORK.get(int(parts[8]), parts[8]),
+            "result": _CR_RESULT.get(int(parts[9]), parts[9]),
+            "start": _CR_START.get(int(parts[10]), parts[10]),
+            "dust": int(parts[11]),
+            # internal length metrics retained (units unconfirmed):
+            "map_len": int(parts[4]), "path_len": int(parts[5]), "virtual_len": int(parts[6]),
         }
     except (ValueError, IndexError):
         return None
@@ -700,12 +703,12 @@ def _print_clean_history(records, as_json):
     if as_json:
         print(json.dumps(records, indent=2))
         return
-    hdr = f"{'Started':<16}  {'Dur':>5}  {'Area':>8}  {'Water':<7}  {'Mode':<12}  {'Route':<5}  {'Pass':>4}  OK"
+    hdr = f"{'Started':<16}  {'Min':>4}  {'Area':>6}  {'Type':<8}  {'Work':<8}  {'Result':<11}  {'Start':<6}  {'Dust':>4}"
     print(hdr)
     print("-" * len(hdr))
     for r in records:
-        print(f"{r['started']:<16}  {r['duration_min']:>4}m  {r['area_m2']:>7.3f}m²  "
-              f"{r['water']:<7}  {r['mode']:<12}  {r['route']:<5}  {r['passes']:>4}  {'✓' if r['ok'] else '✗'}")
+        print(f"{r['started']:<16}  {r['minutes']:>3}m  {r['area_m2']:>4}m²  "
+              f"{r['type']:<8}  {r['work']:<8}  {r['result']:<11}  {r['start']:<6}  {r['dust']:>4}")
 
 
 def cmd_history_from_capture(path: str, as_json: bool = False):
@@ -797,7 +800,7 @@ async def cmd_history(duid: str | None, as_json: bool = False, timeout: int = 15
                         # `{"101":{"52":{"op":"list"}}}` (MITM capture). The s29 attempts used the enum-member
                         # key, which likely serialized to the wrong inner key → no reply. The reply lands on our
                         # OWN /m/o/{username} topic, which the library already subscribes to → retest should work
-                        # with no runtime MITM. (PROTOCOL s30.)
+                        # with no runtime MITM. (PROTOCOL.)
                         await props.command.send(
                             B01_Q10_DP.COMMON, {str(B01_Q10_DP.CLEAN_RECORD.code): {"op": "list"}})
                     except Exception:
@@ -1119,7 +1122,7 @@ async def cmd_map(duid: str | None, timeout: int = 30, out_prefix: str = "map"):
     rooms_out = f"{out_prefix}_rooms.png"
     if best["path"]:
         pts, _ = dm.parse_path(best["path"])
-        pts = dm._drop_path_outlier(pts)   # strip the spurious leading sentinel (green-dot bug) — parity with decode_map.py; band-aid, OPEN QUESTION per PROTOCOL s24
+        pts = dm._drop_path_outlier(pts)   # strip the spurious leading sentinel (green-dot bug) — parity with decode_map.py; band-aid, OPEN QUESTION per PROTOCOL
         if pts:
             with open(path_out, "w") as f:
                 f.write(dm.render_path_svg(pts))
@@ -1293,7 +1296,7 @@ async def cmd_clean_rooms(room_args: list[str], duid: str | None):
 
     # Phase 2a: MQTT instant segment-clean (#851) — opt-in via --mqtt.
     # The firmware accepts ONLY the misspelled key `clean_paramters` as a BARE LIST
-    # (PROTOCOL s28; corroborated by openHAB's merged Q10 code). Instant + no Hawk, but it
+    # (PROTOCOL; corroborated by openHAB's merged Q10 code). Instant + no Hawk, but it
     # carries no per-job params — fan/water/mode/route/count are ignored here; pre-set them
     # (vac.py mode/fan/water) or drop --mqtt for the REST /jobs path (which also covers schedules).
     if mqtt:
@@ -1335,7 +1338,7 @@ async def cmd_clean_rooms(room_args: list[str], duid: str | None):
 
     # One-time cron a couple minutes out. A --dry-run posts the job DISABLED so it can
     # NEVER fire regardless of delete success/timing (the scheduler skips enabled:false
-    # jobs) — this kills the delete-vs-fire race at the source (PROTOCOL s18/s19), so a
+    # jobs) — this kills the delete-vs-fire race at the source (PROTOCOL), so a
     # real clean can use a short, prompt lead instead of a wide 5-min safety window.
     lead = 2
     fire = datetime.now() + timedelta(minutes=lead)
@@ -1830,7 +1833,7 @@ def _common_set(dp, value):
     """Write a B01 stored-pref via the COMMON(101) envelope with the STRING code key —
     `{"101":{"<code>":value}}`, the exact form the app uses. s30: this makes these settings STICK;
     the old direct `command.send(DP, value)` was ignored (wrong wire shape) → they only LOOKED
-    cloud-authoritative (s18). See PROTOCOL s30 CLI-retest."""
+    cloud-authoritative (s18). See PROTOCOL CLI-retest."""
     return lambda p: p.command.send(B01_Q10_DP.COMMON, {str(dp.code): value})
 
 
@@ -2155,7 +2158,7 @@ async def cmd_raw(dp_name: str, value_json: str | None, duid: str | None, common
     # B01 settings writes (button_light/child_lock/DND): inner key is a STRING code (`str(code)`), NOT the
     # enum member. This envelope is CONFIRMED: volume/child-lock/boost/DND/drive/zone/wall all stick via
     # string-key COMMON (s30 live-validated); bare command.send uses the enum-member key which is silently
-    # ignored. See CAPABILITIES write-path + PROTOCOL s30.
+    # ignored. See CAPABILITIES write-path + PROTOCOL.
     target, payload = (B01_Q10_DP.COMMON, {str(dp.code): value}) if common else (dp, value)
     async with device_session(duid) as (_device, props):
         try:
@@ -2461,7 +2464,7 @@ class Daemon:
     async def _supervisor(self):
         """After a 135 throttle, cool down (ESCALATING) then try one reconnect with existing
         creds. Give up after _MAX_RECONNECTS — retrying revoked creds forever is just noise to
-        the server; require a manual `login`. Resets on success. (server-view, PROTOCOL s21)"""
+        the server; require a manual `login`. Resets on success. (server-view, PROTOCOL)"""
         while not self._stop.is_set():
             await asyncio.sleep(15)
             if not self.unauthorized or self.needs_login:

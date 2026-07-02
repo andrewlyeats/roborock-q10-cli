@@ -14,7 +14,7 @@ Importable: `from goto1 import run_goto, vac`. Standalone: runs one default targ
 import subprocess, time, json, base64, struct, os, math
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TAP = os.path.join(os.getcwd(), "goto1_bytes.jsonl")
+TAP = os.path.join(os.getcwd(), "a capture")
 
 
 def vac(*a):

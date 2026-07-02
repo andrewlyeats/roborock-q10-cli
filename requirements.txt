@@ -9,3 +9,4 @@
 python-roborock>=5.14,<6  # B01/Q10 device API + MQTT (public PyPI package; NOT a fork)
 lz4                       # decompress the protocol-301 room grid
 Pillow                    # render the room map PNG (decode_map.py)
+aiohttp                   # Hawk-signed REST schedule calls (vac.py); also a python-roborock dep

@@ -1,7 +1,7 @@
 # Roborock Q10 (B01) cloud protocol — reverse-engineering reference
 
-> **As of:** 2026-06-22 · **Hardware:** Roborock Q10 S5+ (`roborock.vacuum.ss07`, B01 protocol), firmware
-> **03.11.24** · **Stack:** `python-roborock` 5.14.2 (locked; upstream now 5.20.x), Python 3.11 · **Method:** on-device HTTPS proxy +
+> **As of:** 2026-06-27 · **Hardware:** Roborock Q10 S5+ (`roborock.vacuum.ss07`, B01 protocol), firmware
+> **03.11.24** · **Stack:** `python-roborock` 5.14.2 (locked; upstream now 5.22.0), Python 3.11 · **Method:** on-device HTTPS proxy +
 > single-connection MQTT tap, then **observing the app's own traffic in an Android emulator** that unlocked the
 > write surface — see [Method & provenance](#method--provenance).
 >
@@ -107,6 +107,24 @@ where `client-id = md5hex(rriot.u : rriot.k)[2:10]` (the same id the client subs
 read-only tap needs no network interception: you already own the topic your own replies come back on.
 
 
+### Two TLS channels — where each thing lives
+
+The app reaches the cloud over **two TLS channels** (both observable by running the app in an Android emulator and
+watching its own traffic): **MQTT** (`rr/m/i` command / `rr/m/o` status topics) and **REST/HTTP-1** to
+`api-us.roborock.com`. Knowing which channel carries what saves a lot of wrong "not sent / client-side" conclusions.
+
+- **MQTT — device control + status.** The robot→app status frame pushes **~40 data-points every cycle**, so inventory
+  the whole push, not a single DP (that is how `112` (`dpHostError`) and `113` (`dpFineLog`) went unnoticed for a
+  while — both ride *every* status frame, at idle value `0`).
+- **REST — read-only metadata, all GETs:** the `/v4/user/homes/{id}` home-state poll, `/devices/{duid}/shadow`,
+  `/user/devices/{duid}/jobs`, firmware `updatev2`, voice-pkg info, agreement/policy. The home response carries
+  `fv`/`pv`/`featureSet`/`setting`/`extra` (all **null** on this Q10) + an outer-DP `deviceStatus` map.
+- **The one REST write is `/jobs`** (Hawk-signed POST = schedules + one-time room cleans).
+- **Per-clean prefs are client-side:** the app's per-room "Customize" (mode/water/cycles/route) sends nothing on
+  selection or save — it is bundled into the `START_CLEAN` `clean_paramters` blob only when a clean actually starts.
+
+So: **control + status → MQTT; account / home / firmware-version / room metadata → REST GET.**
+
 ## Authentication — Hawk, and the write-path body-signing
 
 REST requests are **Hawk**-signed. The pre-string is seven colon-joined fields; the last is the **payload-hash
@@ -160,8 +178,9 @@ Two sub-types, by the first 2 header bytes.
   room-name records. ✅ Header byte `[6]` is a **map-segmented/finalized flag** (`0` while
   building, `1` once rooms exist). 🟡
 - **`0201` — cleaning path + live heading.** BE int16 `(x,y)` **path-unit** pairs (≈2.5 mm/unit) after a 14-byte header (raw pose; the clean-render georef uses 16 — see FRAME_ANATOMY); last point = robot position. The header also carries the **live SLAM heading** (`b[10:12]`, i16°: 0=+x/+90=+y/±180=−x/−90=−y) + a path-epoch counter (`b[2:4]`). Streams during a clean **or on demand** — any client sending DP-110 `HEARTBEAT` polls it (incl. manual teleop, no rig). ✅
-- **Georeference** (path-units → grid pixel, ≈50 mm/px): the map origin **IS transmitted** in the `0101` header — `x_min`/`y_min` at bytes 11–14 (**raw BE, 5 mm units = 2 path-units**); resolution at 15–16 (always 5 = 50 mm/px); dock coords at 17–22. ✅ `decode_map.py` reads the origin straight from the header (`origin_from_header`, transform `ox = 2·y_min`, `oy = −2·x_min` — the raw ×2); **auto-fit is retained only as a fallback / cross-check** (on-floor parity with the header origin, 29/31 captures) ✅ — others use manual-tune calibration. ❓ python-roborock PR #848 draft attempts an auto-fit too.
-  - **Path→pixel convention** (detail in [FRAME_ANATOMY](FRAME_ANATOMY.md) §9): for the **TRUE byte-14 pose**, `col = (x − oy)//res`, `row = (ox − y)//res` — column from x, row from y inverted (`decode_map.path_to_pixel`; same form as upstream `GridCalibration.world_to_pixel`). `decode_map.coord_to_pixel` (column from y) is the **app-display orientation**, paired with the byte-16 render coords the overlay uses — place a true pose with `path_to_pixel`, not it. **Orientation is a validated convention, not a read field** — corpus-invariant (3,726/3,726 single-map frames; deviations only across a map reset), but no header byte encodes it. So tooling defaults to the read header-standard and **fits orientation+origin by on-floor** only when that fails (`decode_map.fit_registration`, ≈ upstream `solve_calibration`); a per-run self-check flags any map it can't register. *(Q10 grid is top-down / no vertical flip, unlike V1/Q7.)*
+  - **★ Localization signature (2026-06-24):** `0201` frames are **absent entirely until the robot is localized** — `0101` map/grid frames publish regardless (even with a freshly-loaded map and ZERO position info), but NO `0201` is emitted while the robot doesn't know where it is. The **first `0201` after localizing is the marker**: it arrives `count=0, pts=0` (heading-only — the bytes-10-11 heading, the known "stray leading point"), then path points accumulate (2→4→8→…) from the robot's true start pose. **So: detect "is the robot localized?" by the presence of recent `0201` frames** (present=localized; only `0101`, no `0201` = lost / pre-localize).
+- **Georeference** (path-units → grid pixel, ≈50 mm/px): the map origin **IS transmitted** in the `0101` header — `x_min`/`y_min` at bytes 11–14 (**raw s16 BE, 5 mm units = 2 path-units**); resolution at 15–16 (always 5 = 50 mm/px); dock coords at 17–22. ✅ `decode_map.py` reads the origin straight from the header (`origin_from_header`, transform `ox = 2·y_min`, `oy = −2·x_min` — the raw s16 ×2); **auto-fit is retained only as a fallback / cross-check** (on-floor parity with the header origin, 29/31 captures) ✅ — others use manual-tune calibration. ❓ python-roborock PR #848 draft attempts an auto-fit too.
+  - **Path→pixel convention** (detail in [FRAME_ANATOMY](FRAME_ANATOMY.md#georeference--overlaying-a-path-on-a-grid)): for the **TRUE byte-14 pose**, `col = (x − oy)//res`, `row = (ox − y)//res` — column from x, row from y inverted (`decode_map.path_to_pixel`; same form as upstream `GridCalibration.world_to_pixel`). `decode_map.coord_to_pixel` (column from y) is the **app-display orientation**, paired with the byte-16 render coords the overlay uses — place a true pose with `path_to_pixel`, not it. **Orientation is a validated convention, not a read field** — corpus-invariant (3,726/3,726 single-map frames; deviations only across a map reset), but no header byte encodes it. So tooling defaults to the read header-standard and **fits orientation+origin by on-floor** only when that fails (`decode_map.fit_registration`, ≈ upstream `solve_calibration`); a per-run self-check flags any map it can't register. *(Q10 grid is top-down / no vertical flip, unlike V1/Q7.)*
 
 ## Capabilities
 
@@ -181,7 +200,7 @@ against in the seed corpus, when published):
   *Context (Reported):* the RRMapFile **file** format (marcelrv/XiaomiRobotVacuumProtocol) numbers restriction *blocks*
   differently (no-go=9, virtual walls=10, no-mop=12) — a separate encoding from the B01 **MQTT DP** `RESTRICTED_ZONE_UP` types,
   so block numbers don't cross-map between projects.
-- ~~**Map origin in the cloud channel:**~~ **RESOLVED (independently verified):** the origin IS in the `0101` 301-stream header at bytes 11–14 (`x_min`/`y_min`, **raw BE, 5 mm units = 2 path-units**). `decode_map.py` reads it from the header (`origin_from_header`, transform `ox = 2·y_min`, `oy = −2·x_min`); auto-fit is now the fallback. ✅
+- ~~**Map origin in the cloud channel:**~~ **RESOLVED (independently verified):** the origin IS in the `0101` 301-stream header at bytes 11–14 (`x_min`/`y_min`, **raw s16 BE, 5 mm units = 2 path-units**). `decode_map.py` reads it from the header (`origin_from_header`, transform `ox = 2·y_min`, `oy = −2·x_min`); auto-fit is now the fallback. ✅
 - ~~**`CLEAN_RECORD` live-pull trigger**~~ — **RESOLVED :** our own `op:list` returns the back-catalog
   (25 records) via string-key COMMON; no MITM needed. ✅
 - **Unexplained DPs** seen on the `novel` tap but never decoded. ⬜
@@ -195,7 +214,7 @@ against in the seed corpus, when published):
 Every datapoint here is **"we used hardware H + method M → result R"**, then interpreted over the totality of
 available information. Two methods were used: **(1)** an on-device HTTPS proxy (REST capture) + a single-connection
 MQTT tap (the live DP + 301 stream), with a **timestamped operator log** so app-action → REST → MQTT → robot-state
-align — the capture-RE + live-validation work of (2026-06-12 … 16); and **(2)observing the app's own
+align — the capture-RE + live-validation work of (2026-06-12 … 16); and **(2) observing the app's own
 traffic in an Android emulator** (2026-06-18), which revealed the write-side wire format — the string-key
 COMMON envelope and the full command surface — **without the network-level MQTT interception once thought necessary.**
 

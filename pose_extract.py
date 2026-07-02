@@ -10,7 +10,7 @@ swap cancels; raw pose needs 14). Heading is the SLAM yaw — the "missing headi
 to be inferred from path bends; it's a header field. A localization loss (FAULT 556) shows as
 epoch++ with the first pose ≈(0,0) AND heading reset to 0° (verified vs s27's two live 556 events).
 
-Usage: ./pose_extract.py <capture_bytes.jsonl>
+Usage: ./pose_extract.py <a capture>
 Prints each 0201 frame's epoch, count, heading, last point (= robot's live position), and the step
 from the previous frame's last point (displacement between samples)."""
 import json, base64, sys, struct, math
@@ -59,7 +59,7 @@ def reloc_loss(heading, last):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        sys.exit("usage: ./pose_extract.py <capture_bytes.jsonl>")
+        sys.exit("usage: ./pose_extract.py <a capture>")
     frames = pose_frames(sys.argv[1])
     print(f"# {len(frames)} x 0201 path frames")
     prev = None

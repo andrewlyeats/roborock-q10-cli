@@ -15,7 +15,7 @@ Coords are the robot's global-map frame; ×2.5 mm/path-unit (±5%). `0201` point
 import subprocess, time, json, base64, struct, sys, os, math
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TAP = os.path.join(os.getcwd(), "pose_monitor_bytes.jsonl")
+TAP = os.path.join(os.getcwd(), "a capture")
 DUR = int(sys.argv[1]) if len(sys.argv) > 1 else 90
 
 

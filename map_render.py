@@ -338,10 +338,23 @@ def render_xy(scene, out_path, show_walls=True, show_rooms=False, samples=0,
 
     img = Image.new("RGB", (img_w, img_h), (255, 255, 255))
     draw = ImageDraw.Draw(img, "RGBA")
-    try:
-        font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 13)
-        fontb = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 14)
-    except OSError:
+    # Try common regular/bold TrueType fonts across macOS / Linux / Windows; fall back to
+    # Pillow's built-in bitmap font if none are present (labels still render, just lower quality).
+    _FONTS = [
+        ("/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"),  # macOS
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),  # Linux
+        ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"),  # Pillow-bundled / on PATH
+        ("arial.ttf", "arialbd.ttf"),  # Windows
+    ]
+    font = fontb = None
+    for _reg, _bold in _FONTS:
+        try:
+            font = ImageFont.truetype(_reg, 13)
+            fontb = ImageFont.truetype(_bold, 14)
+            break
+        except OSError:
+            continue
+    if font is None:
         font = fontb = ImageFont.load_default()
 
     # Floor tint (optional) then walls — drawn as true-scale cell rects.

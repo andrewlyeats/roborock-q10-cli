@@ -5,6 +5,51 @@ Notable changes to this project. Format loosely follows
 undocumented cloud protocol and relies on `python-roborock` internals, each release notes the
 environment it was **validated against** — check that before trusting it on a newer stack.
 
+## [0.1.5] — 2026-07-02 — map-package vector layers (obstacles / erase areas / carpet) + accuracy pass
+
+Same stack (Q10 S5+, firmware **03.11.24**, `python-roborock` **5.14.2** — locked; upstream now 5.22.0).
+Decodes and renders the map frame's **post-grid vector layers** — the data the app shows as obstacle
+"cones", no-go / erased areas, and carpet — which previously went undecoded (most parsers, including the
+library's, stop at the occupancy grid). Bundled with a repo-wide documentation-accuracy and portability
+pass. No protocol behavior changed beyond the new layer decode. Intended as the stable archival cut.
+
+### Added
+- **`decode_map.parse_package_layers`** — walks the map frame past the grid through its optional
+  **erase / carpet / obstacle / skip** sections and returns them in grid-pixel coordinates. Works on
+  `0101` (live) / `0301` (full-map) / `0401` (build) frames — the same multi-section container. Reaching
+  the obstacle list needs no extra LZ4 decode.
+- **Layer rendering** in `render_grid_png` / `render_overlay_png` (and the `decode_map` CLI): AI-obstacle
+  markers, erase no-go quads, carpet cells, and skip points draw on the room grid by default; the CLI now
+  reports the layer counts.
+- **Map-package georeference**: a section point maps to grid pixel `col = x_min/10 + px`, `row = y_min/10 − py`
+  — origin read from the frame header (`x_min`@11–12, `y_min`@13–14, **signed**), with the per-section scale
+  (obstacles `raw/50`, erases `raw/10`). This `/10` layer origin is distinct from the `×2` path-registration
+  origin (same header bytes, different projection) — documented in DP_DICTIONARY / FRAME_ANATOMY. Validated
+  live: obstacle markers register on the floor-plan footprint, and erase quads land on the app-erased area.
+
+### Fixed
+- **Corrected a false claim:** earlier docs said obstacles were "cloud-only / not in this data." The
+  obstacle *markers* are in the map frame all along (only obstacle *photos* are cloud-side, and this model
+  has no camera). README / DP_DICTIONARY / CAPABILITIES updated; FRAME_ANATOMY now documents the full
+  multi-section map-package layout.
+- **Accuracy pass over the whole repo:** removed stale/dangling doc references (a since-removed
+  `MOTION_MODEL.md`, unshipped probe/test scripts, a non-existent `daemon --help`, un-numbered "§N" pointers,
+  a leftover "TODO" for shipped work) and a stale "room split/merge/rename are read-only" limitation that the
+  tables contradicted; marked `CARPET_UP` **SET** confirmed (CLI-replicated 2026-06-25; was tagged untested);
+  fixed an undefined `[#852]` reference link in `README.md`.
+- **Hardened the publish scrubber** (`sanitize.sh`): it had been stripping signed-int type names (`s16`/`s32`)
+  from the byte-spec docs, leaving parenthetical debris, and letting an internal wiki-link slip through — all
+  fixed, with a gate guard added.
+
+### Changed
+- **Cross-platform label fonts** in `map_render.py`: try macOS / Linux (DejaVu) / Windows TrueType fonts before
+  falling back to Pillow's bitmap font (previously macOS-only, silently degrading elsewhere).
+- Declared **`aiohttp`** directly in `requirements.txt` / `pyproject.toml` (used by `vac.py`'s Hawk-signed schedule
+  calls; previously relied on it as a transitive `python-roborock` dependency).
+- Updated the upstream-contribution status in `CREDITS.md` / `README.md`: the `remote_trait` fix (PR #854) is merged;
+  the clean-record history decode (PR #857) is an open PR under review; the `B01Fault` table (issue #855) and the
+  map-package obstacle/erase/carpet layers (a comment on PR #848) are proposed.
+
 ## [0.1.4] — 2026-06-23 — reusable map renderer + settled path↔grid registration; doc/spec corrections
 
 Same stack (Q10 S5+, firmware **03.11.24**, `python-roborock` **5.14.2** — locked; upstream is now 5.20.x).
@@ -28,7 +73,7 @@ corrects several reference docs (and the `.ksy`).
 ### Corrected / clarified
 - **`frames.ksy`** — the `0101` origin fields (`x_min`/`y_min`/`charge_*`) said "divide by 10", contradicting
   the validated `×2` transform in the same file (a literal /10 yields a badly wrong origin); fixed to "raw
-   in 5-mm header-units → ×2 = path-units". Dropped an inaccurate byte-16 "an x↔y swap cancels" aside (the
+  s16 in 5-mm header-units → ×2 = path-units". Dropped an inaccurate byte-16 "an x↔y swap cancels" aside (the
   byte-16 read is a render-path legacy, not frame structure) and corrected the stray-leading-point example.
 - **Path-decode docs** (FRAME_ANATOMY / PROTOCOL / DP_DICTIONARY) reframed to state the protocol plainly:
   path points are `(x, y)` int16 pairs at **byte 14**, one georef orientation; the byte-16 read is a
@@ -58,7 +103,7 @@ including a **correction to a claim shipped in 0.1.2** (see Corrected).
   `check_nav_planner.py` now ship, so the docs' "validated" rows have runnable evidence.
 
 ### Corrected (supersedes 0.1.2)
-- **The map origin IS transmitted in the `0101` header** — bytes 11–14 (`x_min`/`y_min`, raw BE; 5 mm
+- **The map origin IS transmitted in the `0101` header** — bytes 11–14 (`x_min`/`y_min`, raw s16 BE; 5 mm
   units = 2 path-units), resolution at 15–16, dock coords at 17–22. 0.1.2 stated the origin was "not
   transmitted / must be auto-fit" — that was **wrong**. `decode_map.py` now reads it from the header
   (`origin_from_header`, `ox = 2·y_min`, `oy = −2·x_min`); auto-fit is demoted to a fallback/cross-check
@@ -233,7 +278,7 @@ First public release — the reverse-engineering reference + CLI for the Roboroc
   B01-less library. `requirements.lock.txt` remains the byte-reproducible pin.
 - **Headless daemon support** — a conservative, fail-stop `roborock-vac.service` (`systemd --user`) and
   distinct daemon exit codes (rate-limit `75` / revoked-creds `77` / unreachable `69`) so a service or
-  monitor can react; it stops rather than risk the `135` rate-limit (`test_daemon_exit.py`).
+  monitor can react; it stops rather than risk the `135` rate-limit.
 
 ### Fixed
 - **Daemon `watch`/stream now works.** The stream handler sent its head through a helper that closed the

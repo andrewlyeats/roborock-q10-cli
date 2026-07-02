@@ -1,6 +1,6 @@
 # Anatomy of the Q10 map stream — protocol 301
 
-> **As of:** 2026-06-22 · Q10 S5+ (`roborock.vacuum.ss07`, B01) · firmware 03.11.24 · decoded from the
+> **As of:** 2026-06-27 · Q10 S5+ (`roborock.vacuum.ss07`, B01) · firmware 03.11.24 · decoded from the
 > live "build a new map" capture (map `<map-id>`; real room names redacted).
 > Unofficial, reverse-engineered. Confidence per row: ✅ confirmed · 🟡 inferred · ⬜ unknown.
 
@@ -23,8 +23,11 @@ That output topic carries two protocols:
 - **protocol 301** — spontaneous **binary MAP frames**, with two sub-types keyed by the first two bytes:
   - **`0101`** = room / occupancy **grid** (streams even while docked),
   - **`0201`** = cleaning **path** (streams during a clean or active navigation),
-  - **`0301`** = full-map alternate/master grid layer (same `0101` codec: LZ4 grid + room records). ✅
+  - **`0301`** = full-map / master layer (same `0101` codec + the same post-grid vector layers; may also append a path package). ✅
   - **`0401`** = per-room sub-grids (small per-room bounding boxes, same `0101` codec). ✅
+
+  All of `0101`/`0301`/`0401` share one multi-section layout: header + LZ4 grid + room records, then optional
+  **obstacle / erase / carpet / skip** vector layers (see "Map-package vector layers" below).
 
 At a glance, the two sub-types are laid out like this (byte offsets above each field; not to scale —
 the authoritative per-field detail is in the two tables further down):
@@ -91,6 +94,36 @@ byte-by-byte walkthrough below is the same layout, spelled out.
    `name_length` = byte **26**; `name` = bytes **27 … 27+name_length** (UTF-8). Bytes **2–25** are
    order/type hints + padding (🟡 not fully decoded).
 
+### Map-package vector layers — obstacles / erases / carpet / skip (after the grid)
+
+The frame doesn't end at the grid block. Starting at **`frame[29 + compressed_size]`** (i.e. immediately after the
+compressed grid, in the *outer* frame — these are NOT inside the LZ4 block), four optional sections follow, in order.
+Most decoders stop at the grid and drop them; they hold the data the app draws as obstacle "cones", no-go/erased
+areas, and carpet. All values big-endian. ✅ *decoded + rendered (`decode_map.parse_package_layers`); same layout in
+finalized `0101` and in `0301` full-map frames.*
+
+| order | section | layout | point scale |
+|---|---|---|---|
+| 1 | **erase areas** | `cnt:u8, polyN:u8`, then `cnt × 16B` (each = 4 corners of `int16 x,y`) | `raw / 10` |
+| 2 | **carpet** | `pixLen:u32, pixLzLen:u16`, then an LZ4 block (same codec as the grid) → nonzero cell = carpet | grid cell |
+| 3 | **AI-obstacles** | `n:u8`, then `n × (int16 x, int16 y)` | `raw / 50` |
+| 4 | **skip-clean** | `n:u8`, then `n × (int16 x, int16 y)` | `raw / 10` |
+
+To reach obstacles you don't need to LZ4-decompress anything — just skip `pixLzLen` bytes for the grid block and again
+for the carpet block. Each section degrades gracefully: a `cnt`/`n` of 0 (or a short/partial frame) yields an empty
+layer. A `0301` full-map frame may additionally append a **path package** after skip (a 17-byte header + `int16 (x,y)`
+points); account for it but it is the same path geometry as `0201`.
+
+**Header georeference (placing vector points on the grid).** The frame header carries the origin used here: `x_min`
+at bytes **11–12** and `y_min` at **13–14** (both **s16 BE**), plus `resolution` at **15–16** (÷100 → m/px), dock
+`charge_x`/`charge_y` at **17–18 / 19–20**, and `charge_phi` at **21–22** (see the field-reference table below). For
+the vector layers, `devicePointToOrigMap` divides the origin by 10 for the pixel origin: a vector point `(px, py)` —
+already divided by its section scale above — maps to grid pixel **`col = x_min/10 + px`, `row = y_min/10 − py`** (row
+Y-flipped). *(This `/10` pixel origin is a different projection from the path registration's `×2` path-unit origin in
+the field table — same header bytes, different target space; don't cross them.)* Note the per-section scale differs
+(obstacles `/50`, erases `/10`); they are not interchangeable.
+
+
 ### `0201` — cleaning path
 
 7. Confirm bytes **0–1** = `02 01`. `point_count` = BE u16 at bytes **8–9**.
@@ -121,7 +154,7 @@ byte-by-byte walkthrough below is the same layout, spelled out.
 
    **Determinism & the renderer's fallback.** This orientation is a **validated convention** for this device — it never varies in the corpus (**3,726/3,726** single-map path frames register in the `(y,x)` standard; every apparent deviation was a cross-map mis-pairing in a capture spanning a *map reset*, not the data flipping) — **but it is not read from any header field** (no byte co-varies with it). So `map_render.py` uses the read header-standard by default and, ONLY when that lands few path points on floor (an unseen home / firmware / re-oriented map), **fits orientation+origin by on-floor** (`decode_map.fit_registration`: the 8 axis-aligned orientations × translation, picked conservatively by margin — exactly upstream `solve_calibration`'s posture, with resolution fixed at the read value). A deviating map thus auto-recovers, or is flagged by the per-run on-floor self-check — never silently mis-rendered. *(Whether a header byte latently encodes orientation is untested — closeable only with a deliberately re-oriented map; see CAPABILITIES.)*
 
-   Both use **`res = 20` path-units/px (≈50 mm/px)**. The origin **IS** transmitted in the `0101` header: `x_min` at bytes 11–12 and `y_min` at bytes 13–14 (both **raw BE**, in 5 mm header-units = 2 path-units each). ✅ The map-unit→path-unit reconciliation is **DONE**: `decode_map.py` now reads the origin straight from the header (`origin_from_header`, transform **`ox = 2·y_min`, `oy = −2·x_min`** — each header unit is 5 mm = 2 path-units, so the transform multiplies the **raw** by 2; `fit_method="header"`). The cross-mapping — `ox` from `y_min`, `oy` from `x_min` — is **not a typo**: the header's coordinate frame is rotated 90° from the path frame (header-X ↔ path−Y, header-Y ↔ path-X). **Auto-fit is retained only as a fallback / cross-check** — it lands at on-floor parity with the header origin (29/31 captures; `test_decode_map` 6/6). The auto-fit fallback, for reference: choose the `(ox, oy)` that lands the most path points on floor cells. For a multi-frame run, fit once on the largest frame and align the others by grid overlap — that is exactly what makes the three panels above share a single coordinate frame. *(Worked example: on this capture the fit recovered **`ox = 1001`, `oy = −3307` (path-units)** — the **auto-fit fallback's** values (`decode_map.py`'s former `GRID_ORIGIN_OX/OY` defaults); they only *approximate* the header transform `ox = 2·y_min` (auto-fit optimizes on-floor landing, not the exact origin). Mind the sign, `oy` is **negative** in this `col = (y − oy)` convention — and it landed **99.87 %** of path points on floor cells. Those constants are **per install** — dock-anchored, stable until the dock moves or the map is reset — not universal — though `decode_map` now reads them straight from the header, so this fallback only matters if the header read is unavailable.)* ✅
+   Both use **`res = 20` path-units/px (≈50 mm/px)**. The origin **IS** transmitted in the `0101` header: `x_min` at bytes 11–12 and `y_min` at bytes 13–14 (both **raw s16 BE**, in 5 mm header-units = 2 path-units each). ✅ The map-unit→path-unit reconciliation is **DONE**: `decode_map.py` now reads the origin straight from the header (`origin_from_header`, transform **`ox = 2·y_min`, `oy = −2·x_min`** — each header unit is 5 mm = 2 path-units, so the transform multiplies the **raw** s16 by 2; `fit_method="header"`). The cross-mapping — `ox` from `y_min`, `oy` from `x_min` — is **not a typo**: the header's coordinate frame is rotated 90° from the path frame (header-X ↔ path−Y, header-Y ↔ path-X). **Auto-fit is retained only as a fallback / cross-check** — it lands at on-floor parity with the header origin (29/31 captures; `test_decode_map` 6/6). The auto-fit fallback, for reference: choose the `(ox, oy)` that lands the most path points on floor cells. For a multi-frame run, fit once on the largest frame and align the others by grid overlap — that is exactly what makes the three panels above share a single coordinate frame. *(Worked example: on this capture the fit recovered **`ox = 1001`, `oy = −3307` (path-units)** — the **auto-fit fallback's** values (`decode_map.py`'s former `GRID_ORIGIN_OX/OY` defaults); they only *approximate* the header transform `ox = 2·y_min` (auto-fit optimizes on-floor landing, not the exact origin). Mind the sign, `oy` is **negative** in this `col = (y − oy)` convention — and it landed **99.87 %** of path points on floor cells. Those constants are **per install** — dock-anchored, stable until the dock moves or the map is reset — not universal — though `decode_map` now reads them straight from the header, so this fallback only matters if the header read is unavailable.)* ✅
 
 ## `0101` grid-frame header — field reference
 
@@ -132,12 +165,12 @@ byte-by-byte walkthrough below is the same layout, spelled out.
 | 6 | `map_segmented` flag | u8 | 🟡 | **`0` while the map is still building (unsegmented), `1` once it's finalized into rooms.** Verified `byte6==1 ⟺ rooms>0` on **89/89** frames of this build (it flips the instant the 3 room records appear). Earlier captures only ever saw *built* maps, so it looked like a constant `0x01`. |
 | 7–8 | `width` | u16 BE | ✅ | Grid width px. Verified `==` empirical row-stride on 424/424 frames. *(Historical: reading these as **LE** at `bytes[8:10]` gave a spurious `478` — the same bytes mis-offset + mis-endianned, not a separate field; the correct read is BE at `[7:9]`/`[9:11]`.)* |
 | 9–10 | `height` | u16 BE | ✅ | Grid height px. |
-| 11–12 | `x_min` | BE | ✅ | Map origin X — **raw in 5 mm header-units** (1 unit = 2 path-units). Per-map constant; differs across maps. `decode_map.py` reads it via `origin_from_header` — transform to path-units **`oy = −2·x_min`** (the raw value ×2); auto-fit is the fallback. |
-| 13–14 | `y_min` | BE | ✅ | Map origin Y — raw in 5 mm header-units. Per-map constant. Read with `x_min`: **`ox = 2·y_min`** (raw ×2). |
+| 11–12 | `x_min` | s16 BE | ✅ | Map origin X — **raw s16 in 5 mm header-units** (1 unit = 2 path-units). Per-map constant; differs across maps. `decode_map.py` reads it via `origin_from_header` — transform to path-units **`oy = −2·x_min`** (the raw value ×2); auto-fit is the fallback. |
+| 13–14 | `y_min` | s16 BE | ✅ | Map origin Y — raw s16 in 5 mm header-units. Per-map constant. Read with `x_min`: **`ox = 2·y_min`** (raw ×2). |
 | 15–16 | `resolution` | u16 BE, /100 m/px | ✅ | Always `5` → 0.05 m/px = **50 mm/px** (matches the known grid resolution). |
 | 17–18 | `charge_x` | u16 BE | ✅ | Dock/charge-station X — same header units as `x_min`; `charge_x − x_min` = dock position relative to the origin. |
 | 19–20 | `charge_y` | u16 BE | ✅ | Dock/charge-station Y — same units as `y_min` (read with `charge_x`). |
-| 21–22 | `charge_phi` | BE, negated | ✅ | Dock heading, degrees (negate the raw value). |
+| 21–22 | `charge_phi` | s16 BE, negated | ✅ | Dock heading, degrees (negate the raw value). |
 | 23–24 | declared_size high u16 | u16 BE | 🟡 | High 16 bits of a u32 declared-size; observed as `0x0000`. Low u16 is `declared_size` at bytes 25–26. |
 | 25–26 | `declared_size` | u16 BE | ✅ | Decompressed size = `width × height` + trailing room records. |
 | 27–28 | `compressed_size` | u16 BE | ✅ | LZ4 block length, bytes. |
@@ -148,16 +181,16 @@ byte-by-byte walkthrough below is the same layout, spelled out.
 | Bytes | Field | Type | Conf | What we know |
 |---|---|---|:---:|---|
 | 0–1 | `sub_type` = `0x0201` | u16 BE | ✅ | Path-frame magic. |
-| 2–3 | `path_epoch` | u16 BE | ✅ | Path-epoch counter: resets on power-cycle, **+1 per new traversal** (undock / relocalize / clean-start). A skip >1 ⇒ the robot moved while uncaptured. (The old "byte-3 `clean_counter`" `0x08`/`0x11` were just the low byte at epochs 8/17.) |
-| 4–7 | const `0x00020000` | 4 B | ✅ | Constant across 3,440 path frames. Semantics unnamed. |
-| 8–9 | `point_count` | u16 BE | ✅ | Number of path points. ⚠️ may read **one higher** than the pairs actually present (see decode step 8). |
-| 10–11 | `heading_deg` | i16 BE | ✅ | **Live firmware SLAM heading, degrees** (`0`=+x, `+90`=+y, `±180`=−x, `−90`=−y) — this header field IS the "missing heading DP". **Accuracy by regime: drive-mode 1–2°** (deliberate long straight runs, `heading_probe.py`, 2026-06-22); **teleop 8.7° mae** (offline heading analysis, 48 motion / 17 turn frames — *tracks* the path tangent through TURNS, vs 66–95° for every other offset); **clean-mode per-frame heading diverges from the accumulated-path tangent (~18–52°, capture-dependent)** — but this isn't bad sensor data: it's an *instantaneous* heading sampled while the robot is actively maneuvering (sweeping/turning), compared against a 2400-pt *accumulated* path, so it's simply **not a tight-validation regime**. **NB the official Roborock app does NOT read this field — it recomputes heading from path geometry (atan2 of the last 2 path points); we use the firmware field directly for closed-loop nav.** A localization loss (FAULT 556) snaps it to **0°** with the pose at ≈(0,0). |
-| 12–13 | const `0x0000` | 2 B | ✅ | Constant across 3,440 path frames. Semantics unnamed. |
+| 2–3 | `path_epoch` | u16 BE | ✅ | Path-epoch counter: resets on power-cycle, **+1 per new traversal** (undock / relocalize / clean-start). A skip >1 ⇒ the robot moved while uncaptured. (The old "byte-3 `clean_counter`" `0x08`/`0x11` were just the low byte at epochs 8/17.) **★ u16 width CONFIRMED 2026-06-26**: an exceptionally long whole-apartment session pushed the epoch past 255 to **271**, so **byte 2 (high) went non-zero (`0x01`) for the first time** — every prior (short) session kept it <256 / byte-2 = 0. |
+| 4–7 | const `0x00020000` | 4 B | ✅ | Constant — **re-confirmed across 4,123 frames of the 2026-06-26 whole-apartment clean (incl. an 8,128-point path)**: held `00 02 00 00` throughout, so NOT a latent counter high-byte (byte 5 is always `0x02`). Semantics unnamed. |
+| 8–9 | `point_count` | u16 BE | ✅ | Number of path points. ⚠️ may read **one higher** than the pairs actually present (see decode step 8). **★ u16 + high-byte CONFIRMED at scale 2026-06-26**: the whole-apartment path reached **8,128** points (`0x1fc0`) — high byte non-zero in 3,778/4,123 frames; previously only ever verified at 14 (`0x000e`). The "one higher" reconciles cleanly: header=14 → `point_count` pairs; or header=10 + drop the stray leading point (the heading@10-11 misread as a point) → same real-point set. |
+| 10–11 | `heading_deg` | i16 BE | ✅ | **Live firmware SLAM heading, degrees** (`0`=+x, `+90`=+y, `±180`=−x, `−90`=−y) — this header field IS the "missing heading DP". **Accuracy by regime: drive-mode 1–2°** (deliberate long straight runs, 2026-06-22); **teleop 8.7° mae** (offline heading analysis, 48 motion / 17 turn frames — *tracks* the path tangent through TURNS, vs 66–95° for every other offset); **clean-mode per-frame heading diverges from the accumulated-path tangent (~18–52°, capture-dependent)** — but this isn't bad sensor data: it's an *instantaneous* heading sampled while the robot is actively maneuvering (sweeping/turning), compared against a 2400-pt *accumulated* path, so it's simply **not a tight-validation regime**. **NB the official Roborock app does NOT read this field — it recomputes heading from path geometry (atan2 of the last 2 path points); we use the firmware field directly for closed-loop nav.** A localization loss (FAULT 556) snaps it to **0°** with the pose at ≈(0,0). |
+| 12–13 | const `0x0000` | 2 B | ✅ | Constant — re-confirmed `00 00` across the 4,123-frame whole-apartment clean (2026-06-26). Semantics unnamed. |
 | 14 … | `points` | int16[] (x,y) | ✅ | BE int16 (x, y) **path-unit** pairs (≈2.5 mm/unit) starting at **byte 14** (`pose_extract.py`; exact count 850/850 teleop frames). Read whole pairs to end; ignore a ≤2-byte remainder. Last = robot position; first ≈ dock. `decode_map.py:parse_path` historically reads from **byte 16** (a render-path legacy — count then reads one high; flagged for refactor; use byte 14 + `path_to_pixel`). Some autonomous dock-rooted cleans **prepend one stray leading point ≈ the map origin** (counted in `point_count`; absent on teleop/heartbeat and map-builds) — drop it via the gross-outlier rule (step 8). |
 
 ## Open questions (visible in this very capture)
 
-- ~~**The map origin is not transmitted**~~ — **RESOLVED (independently verified):** the origin IS encoded in the `0101` header at bytes 11–14 (`x_min`/`y_min`, **raw BE, 5 mm units = 2 path-units**); `resolution` is at 15–16 (always 5 = 50 mm/px); dock coords at 17–22. `decode_map.py` reads the origin straight from the header (`origin_from_header`, transform `ox = 2·y_min`, `oy = −2·x_min`); **auto-fit is now only a fallback / cross-check** (on-floor parity with the header origin, 29/31 captures). ✅
+- ~~**The map origin is not transmitted**~~ — **RESOLVED (independently verified):** the origin IS encoded in the `0101` header at bytes 11–14 (`x_min`/`y_min`, **raw s16 BE, 5 mm units = 2 path-units**); `resolution` is at 15–16 (always 5 = 50 mm/px); dock coords at 17–22. `decode_map.py` reads the origin straight from the header (`origin_from_header`, transform `ox = 2·y_min`, `oy = −2·x_min`); **auto-fit is now only a fallback / cross-check** (on-floor parity with the header origin, 29/31 captures). ✅
 - **The `pts[0]` ≈map-origin sentinel** — **characterized 2026-06-21** (constant, tracks the map origin; on some dock-rooted cleans, absent in map-builds + teleop; both decoders handle it — `decode_map` strips it, `pose_extract` uses the last point; reconciles with the PoC's offset-18). Exact per-frame trigger unpinned — cosmetic.
 - **~~Bytes `11–24`~~ — mostly RESOLVED (2026-06-20):** the 0201 header is now decoded — epoch (2–3),
   const (4–7), count (8–9), **heading (10–11)**, const (12–13); see the header table above. No remaining

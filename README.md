@@ -65,7 +65,7 @@ account you can't afford to disrupt.
 |---|---|
 | Model | Roborock Q10 S5+ (`roborock.vacuum.ss07`, B01 protocol) |
 | Firmware | **last validated against 03.11.24** (2026-06) |
-| Python | 3.11 (3.11+ required) · `python-roborock` 5.14.2 (locked; upstream now 5.20.x) |
+| Python | 3.11 (3.11+ required) · `python-roborock` 5.14.2 (locked; upstream now 5.22.0) |
 
 Other Roborock models are **untested** — they may share the B01 protocol (in which case much of this
 should work) or differ. Reports from other models are welcome ([CONTRIBUTING.md](CONTRIBUTING.md)).
@@ -104,8 +104,8 @@ A small background daemon holds **one** persistent cloud connection and serves e
 local socket, so commands don't each reconnect (and can't trip `135`). When one is running it's the
 default path; if it isn't, commands print how to start it. It's **validated live** — one held
 connection served reads, taps, and an hour of cleans without reconnecting. (The `135` rate-limit a single held connection
-sidesteps — and why that's the safe design — is in [PROTOCOL.md](PROTOCOL.md#transport); per-flag
-mechanics like `--careful` are in `./vac.py daemon --help`.)
+sidesteps — and why that's the safe design — is in [PROTOCOL.md](PROTOCOL.md#transport); the
+`--careful` flag is shown in the daemon examples just below.)
 
 ```bash
 ./vac.py daemon start --careful # recommended: holds one connection, stops on the first 135/auth complaint
@@ -164,7 +164,7 @@ Everyday commands:
 Capture & decode (the reverse-engineering surface):
 
 ```bash
-./vac.py watch # live table of the modeled status fields (--out clean.csv for CSV)
+./vac.py watch # live table of the modeled status fields (out clean.csv for CSV)
 ./vac.py watch --raw --out clean.jsonl # EVERY decoded data-point, one JSON object per line
 ./vac.py map # floor plan -> map_rooms.png (grid renders anytime; +map_path.svg only during a clean)
 ./vac.py watch --bytes --out cap.jsonl && ./decode_map.py cap.jsonl # low-level: byte capture -> offline decode
@@ -198,7 +198,7 @@ What each tool does, validated metrics, and what's still gated → **[AUTONOMY.m
 - **Cloud-only.** No local control for this model (B01 protocol).
 - **Map.** `vac.py map` renders the room grid (colour-coded, room-name-labeled). The grid streams
   even while docked; the cleaning path + live position stream during a clean (and other active navigation). Georeference:
-  grid dimensions and the map origin are read straight from the frame header (origin at bytes 11–14, `x_min`/`y_min`, verified) → `map_overlay.png` (auto-fit is retained only as a fallback). Obstacles are cloud-only (not in this data) — the library exposes none of this natively.
+  grid dimensions and the map origin are read straight from the frame header (origin at bytes 11–14, `x_min`/`y_min`, verified) → `map_overlay.png` (auto-fit is retained only as a fallback). **AI-obstacle markers (the "cones"), erase / no-go areas, and carpet zones are also decoded from the map frame and rendered** — they live in sections after the grid that most decoders drop. Only obstacle *photos* are cloud-side, and this model has no camera. The library exposes none of this natively.
 - **Room cleaning** (`clean-rooms`) has two paths. **`--mqtt`** runs an **instant** MQTT segment-clean
   (no Hawk; each room cleans with its *saved* fan/water/mode) — the direct way to clean specific rooms now.
   The default posts a one-time REST `/jobs` job that fires **~2 min later**, but it carries per-job
@@ -228,6 +228,8 @@ The highlights:
 
 - **The B01 map format** — the room grid is LZ4-compressed; path/position arrive as protocol-301
   frames. Decoded end-to-end into a labeled floor plan — grid dimensions and the map origin (bytes 11–14, verified ✅) read straight from the frame header; auto-fit is retained only as a fallback.
+  The frame's post-grid **vector layers** — AI-obstacle markers, erase/no-go areas, and carpet — are decoded
+  too (most parsers, including the library's, stop at the occupancy grid).
   *(Not a sole source: python-roborock [PR #848] is converging on a similar auto-fit solve — read this
   as an independent, dated corroboration, with the provenance write-up as the durable part.)*
   → [FRAME_ANATOMY.md](FRAME_ANATOMY.md), [PROTOCOL.md](PROTOCOL.md), [`decode_map.py`](decode_map.py)
@@ -244,9 +246,11 @@ The highlights:
 
 **How this relates to upstream.** Basic Q10 control/status/sensors are already in `python-roborock` +
 Home Assistant core, and map/georef/wall-zone decode is **converging fast in python-roborock** — community
-PRs [#847] (merged) + [#848]/[#851] (open), alongside our own contributions that shipped: the **Hawk `/jobs`
-body-signing** fix (our PR [#852], 5.15.2) and a **Q10 zone type-2/3** type-code correction to community PR [#850] (5.18.0).
-The decode/map parts here overlap that work — a dated, independent take on the same ground. What's least
+PRs [#847] (merged) + [#848]/[#851] (open), alongside our own contributions. **Merged:** the **Hawk `/jobs`
+body-signing** fix (our PR [#852], 5.15.2), the **`remote_trait`** inner-key fix (PR [#854]), and a **Q10 zone
+type-2/3** type-code correction to community PR [#850] (5.18.0). **Open / proposed:** the **clean-record history**
+decode (PR [#857], under review) and the map-package **obstacle / erase / carpet layers** (a follow-up comment on
+PR [#848]). The decode/map parts here overlap that work — a dated, independent take on the same ground. What's least
 covered elsewhere: the **confidence-tagged protocol reference**, the **firmware SLAM heading** (`0201`
 offset-10), and the **closed-loop nav** built on it. We've upstreamed what fits the library and hope the
 reference is useful to anyone building on B01.
@@ -285,3 +289,6 @@ against the real device. See [CREDITS.md](CREDITS.md).
 [#848]: https://github.com/Python-roborock/python-roborock/pull/848
 [#850]: https://github.com/Python-roborock/python-roborock/pull/850
 [#851]: https://github.com/Python-roborock/python-roborock/pull/851
+[#852]: https://github.com/Python-roborock/python-roborock/pull/852
+[#854]: https://github.com/Python-roborock/python-roborock/pull/854
+[#857]: https://github.com/Python-roborock/python-roborock/pull/857

@@ -24,7 +24,7 @@ PY = sys.executable
 def scan(secs=10, name="scan", tap=None):
     """Capture a live grid snapshot and render it. Returns {png_name: path, ...} or None."""
     od = os.getcwd()
-    tap = tap or os.path.join(od, "scan_bytes.jsonl")
+    tap = tap or os.path.join(od, "a capture")
     open(tap, "w").close()                                  # fresh tap (no stale frames)
     vac("daemon", "record", "--bytes", tap); time.sleep(2)  # start the background 301 capture
     for _ in range(max(3, secs // 2)):                      # heartbeat to trigger + sustain the stream

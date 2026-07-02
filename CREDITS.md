@@ -41,13 +41,19 @@ below). Everything else we reuse, learn from, or build on — credited here.
   safe-by-default against the connection rate-limit. python-roborock has the reusable
   `DeviceManager` but no documented long-running/daemon mode — an `examples/daemon.py`
   upstream is a gap we'd like to fill.
-- **B01 reverse-engineering**: the Hawk REST **body-signing** fix (path-only signing can't do B01
-  `/jobs` writes) — **shipped upstream as [PR #852](https://github.com/Python-roborock/python-roborock/pull/852)
-  in `python-roborock` 5.15.2**, our first contribution; and the **Q10 zone type-2/3** correction we contributed
-  to [PR #850](https://github.com/Python-roborock/python-roborock/pull/850), **shipped in 5.18.0**. Still
-  candidates for upstream: the **`0201` firmware SLAM heading** + closed-loop nav, the **`remote_trait`**
-  inner-key fix (`{"101":{"12":N}}`), applying the **`B01Fault`** table to the Q10 path, and the
-  **`CLEAN_RECORD` (history)** decode.
+- **B01 reverse-engineering**, contributed back to `python-roborock`:
+  - **Merged:** the Hawk REST **body-signing** fix (path-only signing can't do B01 `/jobs` writes) —
+    [PR #852](https://github.com/Python-roborock/python-roborock/pull/852), shipped in **5.15.2** (our first
+    contribution); the **`remote_trait`** inner-key fix (`{"101":{"12":N}}`) —
+    [PR #854](https://github.com/Python-roborock/python-roborock/pull/854); and the **Q10 zone type-2/3**
+    correction contributed to [PR #850](https://github.com/Python-roborock/python-roborock/pull/850), shipped
+    in **5.18.0**.
+  - **Proposed / open:** the **`CLEAN_RECORD` clean-history** decode —
+    [PR #857](https://github.com/Python-roborock/python-roborock/pull/857) (open, under review); a **`B01Fault`
+    table** for the Q10 path — [issue #855](https://github.com/Python-roborock/python-roborock/issues/855); and
+    the map-package **obstacle / erase / carpet layers**, offered as a follow-up comment on the community map PR
+    [#848](https://github.com/Python-roborock/python-roborock/pull/848).
+  - **Still on the bench (not yet proposed):** the **`0201` firmware SLAM heading** + closed-loop nav.
 
 ## Built with AI assistance
 

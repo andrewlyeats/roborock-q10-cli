@@ -2,8 +2,8 @@
 """Heading-aware navigation for the Roborock Q10 (B01) — both nav modes as options (CAPABILITIES #15).
 
 Enabled by the 2026-06-20 finding that the 0201 frame carries a live SLAM heading (b[10:12], i16°).
-Unlike goto1.py (which assumed the dock at origin facing -x — INVALID on the whole-apartment map,
-see OVERNIGHT_LOG), nav.py is FRAME-AGNOSTIC: it reads the actual live pose AND heading and steers by
+Unlike goto1.py (which assumed the dock at origin facing -x — INVALID on the whole-apartment map),
+nav.py is FRAME-AGNOSTIC: it reads the actual live pose AND heading and steers by
 bearing-to-target. Two user-selectable modes:
 
   --mode closed  (default): closed-loop. Each step: read live pose+heading → if not aimed at the
@@ -12,7 +12,7 @@ bearing-to-target. Two user-selectable modes:
   --mode dead   : dead-reckoning (open-loop). Read ONE start pose+heading, compute the whole nudge
                   plan from the motion model (turn to bearing, then forward), fire it BLIND (no
                   mid-course feedback), then read the final pose only to REPORT error. Works even if
-                  live pose is unavailable; shows the open-loop model error (~14% per MOTION_MODEL).
+                  live pose is unavailable; shows the open-loop model error (~14% per the motion model).
 
 Heading/turn sign convention (verified offline, pose_turn1/dr1): LEFT nudge = +Δheading (CCW),
 RIGHT = -Δheading (CW); fwd ~120 mm (~48 path-units) / nudge; turn ~21.8°/nudge; ~2.5 mm/unit.
@@ -26,7 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import pose_extract
 
-TAP = os.path.join(os.getcwd(), "nav_bytes.jsonl")
+TAP = os.path.join(os.getcwd(), "a capture")
 MM_PER_UNIT = 2.5
 FWD_MM_PER_NUDGE = 120.0
 DEG_PER_NUDGE = 21.8

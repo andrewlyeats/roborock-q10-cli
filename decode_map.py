@@ -61,7 +61,7 @@ import sys
 # varies by session / firmware / clean-mode (0x08 AND 0x11 both observed — s23 mop-mode
 # emitted 0201_0011_...); parse_path reads the point count from bytes 8-9 and is agnostic
 # to it. Matching the full 8-byte sig "0201000800020000" found ZERO path frames whenever
-# byte 3 differed (it silently dropped the entire s23 cleaning path). See PROTOCOL s23.
+# byte 3 differed (it silently dropped the entire s23 cleaning path). See PROTOCOL.
 PATH_SIG = "0201"
 # Grid frames: match only the 2-byte sub-type PREFIX. Bytes 2-5 of the full 8-byte
 # header are a device-specific map id (e.g. <device-map-id> on the dev's robot) and differ per
@@ -86,6 +86,7 @@ ROOM_COLORS = [
 ]
 OUTSIDE = (255, 255, 255)
 WALL = (55, 55, 55)
+CARPET_FILL = (150, 110, 70)  # map-package carpet cells (distinct from the DP CARPET_UP overlay)
 
 
 def load_frames(path, sig):
@@ -118,7 +119,7 @@ def parse_path(raw):
     Stray leading point: SOME autonomous dock-rooted cleans prepend one extra point ≈ the map origin
     (counted in `count`); `_drop_path_outlier` strips it. Absent on teleop/heartbeat (pose_hb1/hb4) and
     map-builds; present in the s23/s24/s26 cleans. OPEN QUESTION (do NOT call resolved): what TRIGGERS it
-    — clean mode? resume? A targeted short-vs-long/resumed-clean capture would settle it. See PROTOCOL s28.
+    — clean mode? resume? A targeted short-vs-long/resumed-clean capture would settle it. See PROTOCOL.
     """
     count = struct.unpack(">H", raw[8:10])[0]
     body = raw[16:]
@@ -132,8 +133,7 @@ def _drop_path_outlier(pts):
     ~(0,-1900), counted in the frame's `count`; see parse_path). Drop pts[0] ONLY if its step to
     pts[1] is a gross outlier (>20x the median step), so a genuine first point (e.g. a dock point)
     is never dropped — robust and trigger-agnostic. NOT a firmware-version thing (byte[3] is a
-    per-clean counter). What TRIGGERS the sentinel is an OPEN QUESTION (see parse_path / PROTOCOL
-    s28). Surfaced as the green START dot landing outside the walls (user-caught, s24).
+    per-clean counter). What TRIGGERS the sentinel is an OPEN QUESTION (see parse_path / PROTOCOL). Surfaced as the green START dot landing outside the walls (user-caught, s24).
     """
     if len(pts) < 4:
         return pts
@@ -174,6 +174,70 @@ def decompress_grid(raw):
     declared = struct.unpack(">H", raw[25:27])[0]
     clen = struct.unpack(">H", raw[27:29])[0]
     return lz4.block.decompress(raw[29:29 + clen], uncompressed_size=declared)
+
+
+def parse_package_layers(raw):
+    """Walk the map-package sections AFTER the grid (erases → carpet → obstacles → skip) and return
+    them in grid-pixel (col, row) coords. Works on any finalized map frame (0101/0301/0401) — the
+    same multi-section `yxmappackagescript` container; we historically stopped at the grid and dropped
+    all of this (the obstacle "cones" + the user's erase no-go areas). See the DP_DICTIONARY obstacle-
+    markers section.
+
+    `raw` is the full frame (sub-type byte + package). All big-endian. The pixel transform is the
+    app's `devicePointToOrigMap`: col = ox/10 + point.x, row = oy/10 - point.y (row Y-flipped), where
+    each section divides its raw int16 by its OWN scale: obstacles /50, erases /10, skip /10.
+
+    Returns {erases:[[(col,row)x4],...], obstacles:[(col,row),...], skip:[(col,row),...],
+             carpet_cells:set((col,row)), unaccounted:int}. Missing/short sections yield empties.
+    """
+    import lz4.block
+    out = {"erases": [], "obstacles": [], "skip": [], "carpet_cells": set(), "unaccounted": 0}
+    if len(raw) < 29:
+        return out
+    ox = struct.unpack(">h", raw[11:13])[0]  # signed: origins go negative (matches origin_from_header / frames.ksy s16)
+    oy = struct.unpack(">h", raw[13:15])[0]
+    W = struct.unpack(">H", raw[7:9])[0]
+    clen = struct.unpack(">H", raw[27:29])[0]
+    x0, y0 = ox / 10.0, oy / 10.0
+
+    def dev(raw_x, raw_y, scale):                      # devicePointToOrigMap
+        return (x0 + raw_x / scale, y0 - raw_y / scale)
+
+    def i16(b, o):
+        return struct.unpack(">h", b[o:o + 2])[0]
+
+    s = 29 + clen
+    try:
+        # erases: cnt:u8, polyN:u8, cnt x (4 corners x int16 x,y) -- point = raw/10
+        cnt = raw[s]; s += 1
+        if cnt:
+            s += 1  # polyN
+            for _ in range(cnt):
+                sub = raw[s:s + 16]; s += 16
+                out["erases"].append([dev(i16(sub, j * 4), i16(sub, j * 4 + 2), 10.0) for j in range(4)])
+        # carpet: pixLen:4, pixLzLen:2, +data (a grid; nonzero cell = carpet)
+        cpl = struct.unpack(">I", raw[s:s + 4])[0]; cpz = struct.unpack(">H", raw[s + 4:s + 6])[0]; s += 6
+        if cpl:
+            cdata = raw[s:s + (cpz if cpz else cpl)]; s += (cpz if cpz else cpl)
+            try:
+                cg = lz4.block.decompress(cdata, uncompressed_size=cpl) if cpz else cdata
+                for i, b in enumerate(cg[:len(cg)]):
+                    if b:
+                        out["carpet_cells"].add((i % W, i // W))
+            except Exception:
+                pass
+        # obstacles: n:u8, n x int16 x,y -- point = raw/50
+        n = raw[s]; s += 1
+        for _ in range(n):
+            out["obstacles"].append(dev(i16(raw, s), i16(raw, s + 2), 50.0)); s += 4
+        # skip-clean: n:u8, n x int16 x,y -- point = raw/10
+        sn = raw[s]; s += 1
+        for _ in range(sn):
+            out["skip"].append(dev(i16(raw, s), i16(raw, s + 2), 10.0)); s += 4
+    except (IndexError, struct.error):
+        pass  # short/partial frame — return what we got
+    out["unaccounted"] = max(0, len(raw) - s)          # path package etc. (logged, not yet parsed here)
+    return out
 
 
 def parse_rooms(out):
@@ -220,8 +284,7 @@ def find_width(grid):
 
 def grid_dims_from_header(raw):
     """Grid (W, H) read straight from the 0101 frame header: raw[7:9]=W, raw[9:11]=H,
-    both BE u16. Verified 100% against find_width across 424 frames / 2 widths (PROTOCOL
-    s25). Returns None if the bytes are missing or implausible, so callers fall back to
+    both BE u16. Verified 100% against find_width across 424 frames / 2 widths (PROTOCOL). Returns None if the bytes are missing or implausible, so callers fall back to
     find_width. This is what makes the decode size-agnostic on any home (the dimensions
     are read off the wire, not guessed from a row-stride heuristic)."""
     if len(raw) < 11:
@@ -241,7 +304,7 @@ def resolve_dims(raw, out):
     Slicing by the HEADER dims (not by parse_rooms' boundary) is what keeps decode robust:
     some frames decompress to exactly W*H+2 bytes (a 2-byte room footer), which made the old
     find_width path mis-detect the stride (e.g. 418×41) on in-progress/edge frames. See
-    PROTOCOL s26. `(0,0)` reset frames → grid_dims_from_header returns None → fallback."""
+    PROTOCOL. `(0,0)` reset frames → grid_dims_from_header returns None → fallback."""
     hdr = grid_dims_from_header(raw)
     if hdr and hdr[0] * hdr[1] <= len(out):
         W, H = hdr
@@ -290,7 +353,7 @@ def fit_origin(grid, W, H, pts, res=GRID_MM_PER_PIXEL):
     FALLBACK ONLY: the origin IS transmitted in the 0101 header (x_min@11-12, y_min@13-14) —
     `origin_from_header()` reads it directly and is the primary source. This auto-fit is kept as a
     fallback/cross-check for null-origin frames; it lands at on-floor parity with the header origin
-    (29/31 captures). (The old "origin is NOT transmitted, exhaustive search" belief — PROTOCOL s25 —
+    (29/31 captures). (The old "origin is NOT transmitted, exhaustive search" belief — PROTOCOL —
     was overturned by the gap-research byte-coverage sweep; see origin_from_header.)
     """
     if len(pts) < 4:
@@ -376,13 +439,17 @@ def fit_registration(grid, W, H, pts, res=GRID_MM_PER_PIXEL):
     return out
 
 
-def render_grid_png(grid, W, H, rooms, scale=3):
+def render_grid_png(grid, W, H, rooms, scale=3, layers=None):
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (W, H), OUTSIDE)
     px = img.load()
     centroids = {}  # room_id -> [sumx, sumy, count]
+    carpet = layers["carpet_cells"] if layers else set()
     for i, b in enumerate(grid):
         x, y = i % W, i // W
+        if (x, y) in carpet:
+            px[x, y] = CARPET_FILL
+            continue
         if b == 243:
             continue  # outside (already white)
         if b == 249:
@@ -396,13 +463,28 @@ def render_grid_png(grid, W, H, rooms, scale=3):
         else:
             px[x, y] = (210, 210, 210)
     img = img.resize((W * scale, H * scale), Image.NEAREST)
-    draw = ImageDraw.Draw(img)
+    draw = ImageDraw.Draw(img, "RGBA")
+    if layers:
+        draw_package_layers(draw, layers, scale)
     for rid, (sx, sy, n) in centroids.items():
         if n < 30:
             continue
         label = rooms.get(rid, f"room{rid}").replace("rr_", "")
         draw.text((sx / n * scale, sy / n * scale), label, fill=(0, 0, 0), anchor="mm")
     return img
+
+
+def draw_package_layers(draw, layers, scale):
+    """Draw map-package layers (from parse_package_layers) onto a scaled PIL ImageDraw:
+    erase no-go quads (cyan outline+fill), AI-obstacle "cones" (yellow dots), skip-clean points (orange)."""
+    for quad in layers.get("erases", []):
+        draw.polygon([(c * scale, r * scale) for c, r in quad], outline=(0, 200, 220, 255), fill=(0, 200, 220, 70))
+    for c, r in layers.get("skip", []):
+        draw.ellipse([c * scale - 2, r * scale - 2, c * scale + 2, r * scale + 2], fill=(255, 150, 40, 230))
+    rad = max(2, scale)
+    for c, r in layers.get("obstacles", []):
+        draw.ellipse([c * scale - rad, r * scale - rad, c * scale + rad, r * scale + rad],
+                     fill=(255, 230, 0, 255), outline=(80, 60, 0, 255))
 
 
 # ── DP overlay data (walls / zones / carpets) ────────────────────────────────
@@ -607,15 +689,17 @@ def path_to_pixel(x, y, W, H, ox=GRID_ORIGIN_OX, oy=GRID_ORIGIN_OY, res=GRID_MM_
     World→pixel registration: col←x, row←y inverted — `col=(x−oy)//res, row=(ox−y)//res` (a per-axis
     scale + Y-flip). Use for the real pose frame (heading 0=+x/+90=+y): pose_extract output, nav, the XY
     plot. Same form as upstream `GridCalibration.world_to_pixel`. (Implemented as coord_to_pixel with x,y
-    swapped, since coord_to_pixel uses the app's col←y orientation.) See FRAME_ANATOMY §9."""
+    swapped, since coord_to_pixel uses the app's col←y orientation.) See FRAME_ANATOMY's georeference section."""
     return coord_to_pixel(y, x, W, H, ox, oy, res)
 
 
 def render_overlay_png(grid, W, H, rooms, path_pts, dp_overlay=None, scale=3,
-                       ox=GRID_ORIGIN_OX, oy=GRID_ORIGIN_OY, res=GRID_MM_PER_PIXEL):
+                       ox=GRID_ORIGIN_OX, oy=GRID_ORIGIN_OY, res=GRID_MM_PER_PIXEL, layers=None):
     """Room grid PNG with the cleaning path and optional DP shapes overlaid.
 
     dp_overlay: dict from load_dp_overlay() — walls, no-go zones, carpets, etc.
+    layers: dict from parse_package_layers() — the map-package's own AI-obstacle "cones", erase no-go
+            quads, carpet cells, skip points (in grid-pixel coords; drawn directly).
     Dock = green circle, robot end = red circle.
     Virtual walls = dark red lines. No-go zones = red hatched rectangles.
     Cleaning zones = green rectangles. Carpets = blue outlines.
@@ -707,6 +791,14 @@ def render_overlay_png(grid, W, H, rooms, path_pts, dp_overlay=None, scale=3,
             pxpts = [p for p in pxpts if p]
             if len(pxpts) >= 2:
                 draw.polygon(pxpts, outline=(30, 80, 220), fill=None)
+
+    # Map-package layers (the frame's own obstacles / erases / carpet / skip) — drawn in grid-px
+    if layers:
+        from PIL import ImageDraw
+        for (gx, gy) in layers.get("carpet_cells", ()):  # carpet under the markers
+            draw.rectangle([gx * scale, gy * scale, gx * scale + scale - 1, gy * scale + scale - 1],
+                           fill=CARPET_FILL)
+        draw_package_layers(ImageDraw.Draw(img, "RGBA"), layers, scale)
 
     return img
 
@@ -974,7 +1066,13 @@ def main():
         print(f"\nROOM GRID @ {tm}: {len(grid)} cells, {W}x{H} (via {dsrc}), {len(rooms)} rooms")
         for rid in sorted(rooms):
             print(f"  room {rid}: {rooms[rid]}")
-        img = render_grid_png(grid, W, H, rooms)
+        layers = parse_package_layers(raw)         # the frame's own obstacles / erases / carpet / skip
+        nlay = (len(layers["obstacles"]), len(layers["erases"]), len(layers["carpet_cells"]), len(layers["skip"]))
+        if any(nlay):
+            print(f"  map-package layers: {nlay[0]} obstacle cone(s), {nlay[1]} erase area(s), "
+                  f"{nlay[2]} carpet cell(s), {nlay[3]} skip point(s)"
+                  + (f"  [+{layers['unaccounted']}B unaccounted — path package]" if layers["unaccounted"] else ""))
+        img = render_grid_png(grid, W, H, rooms, layers=layers)
         img.save("map_rooms.png")
         print(f"  wrote map_rooms.png ({img.size[0]}x{img.size[1]})")
 
@@ -996,10 +1094,11 @@ def main():
                 why = f"weak ({fit[3] * 100:.0f}%)" if fit else "no fit"
                 print(f"  georef auto-fit {why} → committed OX={ox} OY={oy} res={res}")
             overlay = render_overlay_png(grid, W, H, rooms, pts, dp_overlay=dp_overlay,
-                                         ox=ox, oy=oy, res=res)
+                                         ox=ox, oy=oy, res=res, layers=layers)
             overlay.save("map_overlay.png")
             suffix = " + DP shapes" if dp_overlay else ""
-            print(f"  wrote map_overlay.png (path on grid{suffix})")
+            lsuffix = " + cones/erases" if any(nlay) else ""
+            print(f"  wrote map_overlay.png (path on grid{suffix}{lsuffix})")
 
 
 if __name__ == "__main__":
